@@ -42,13 +42,13 @@ map -altgr +shift 0x56 0x2C..0x35      ~ ">YXCVBNM;:_"
 # Keys requiring AltGr
 #
 
-map +altgr -shift 0x02 ~ "|"
+map +altgr -shift 0x02 ~ "¦"
 map +altgr -shift 0x03 ~ "@"
 map +altgr -shift 0x04 ~ "#"
 map +altgr -shift 0x05 ~ "¼"
 map +altgr -shift 0x06 ~ "½"
 map +altgr -shift 0x07 ~ "¬"
-map +altgr -shift 0x08 ~ "¦"
+map +altgr -shift 0x08 ~ "|"
 map +altgr -shift 0x09 ~ "¢"
 map +altgr -shift 0x0C ~ "´"
 map +altgr -shift 0x0D ~ "~"

@@ -28,6 +28,8 @@
 #include "types.h"
 
 #include <guacamole/client.h>
+#include <guacamole/protocol.h>
+#include <guacamole/socket.h>
 
 #include <stdbool.h>
 #include <stdlib.h>
@@ -56,6 +58,12 @@ int guac_terminal_echo(guac_terminal* term, unsigned char c) {
     static int codepoint = 0;
 
     const int* char_mapping = term->char_mapping[term->active_char_set];
+
+    /* Echo to pipe stream if open and not starting an ESC sequence */
+    if (term->pipe_stream != NULL && c != 0x1B) {
+        guac_terminal_pipe_stream_write(term, c);
+        return 0;
+    }
 
     /* If using non-Unicode mapping, just map straight bytes */
     if (char_mapping != NULL) {
@@ -899,7 +907,7 @@ int guac_terminal_set_directory(guac_terminal* term, unsigned char c) {
             term->upload_path_handler(term->client, filename);
         else
             guac_client_log(term->client, GUAC_LOG_DEBUG,
-                    "Cannot set upload path. File is transfer not enabled.");
+                    "Cannot set upload path. File transfer is not enabled.");
         length = 0;
     }
 
@@ -924,7 +932,7 @@ int guac_terminal_download(guac_terminal* term, unsigned char c) {
             term->file_download_handler(term->client, filename);
         else
             guac_client_log(term->client, GUAC_LOG_DEBUG,
-                    "Cannot send file. File is transfer not enabled.");
+                    "Cannot send file. File transfer is not enabled.");
         length = 0;
     }
 
@@ -932,6 +940,52 @@ int guac_terminal_download(guac_terminal* term, unsigned char c) {
     else if (length < sizeof(filename)-1)
         filename[length++] = c;
 
+    return 0;
+
+}
+
+int guac_terminal_open_pipe_stream(guac_terminal* term, unsigned char c) {
+
+    static char stream_name[2048];
+    static int length = 0;
+
+    /* Open pipe on ECMA-48 ST (String Terminator) */
+    if (c == 0x9C || c == 0x5C || c == 0x07) {
+
+        /* End stream name string */
+        stream_name[length++] = '\0';
+        length = 0;
+
+        /* Open new pipe stream */
+        guac_terminal_pipe_stream_open(term, stream_name);
+
+        /* Return to echo mode */
+        term->char_handler = guac_terminal_echo;
+
+    }
+
+    /* Otherwise, store character within stream name */
+    else if (length < sizeof(stream_name)-1)
+        stream_name[length++] = c;
+
+    return 0;
+
+}
+
+int guac_terminal_close_pipe_stream(guac_terminal* term, unsigned char c) {
+
+    /* Handle closure on ECMA-48 ST (String Terminator) */
+    if (c == 0x9C || c == 0x5C || c == 0x07) {
+
+        /* Close any existing pipe */
+        guac_terminal_pipe_stream_close(term);
+
+        /* Return to echo mode */
+        term->char_handler = guac_terminal_echo;
+
+    }
+
+    /* Ignore all other characters */
     return 0;
 
 }
@@ -954,6 +1008,14 @@ int guac_terminal_osc(guac_terminal* term, unsigned char c) {
         /* Set upload directory OSC */
         else if (operation == 482201)
             term->char_handler = guac_terminal_set_directory;
+
+        /* Open and redirect output to pipe stream OSC */
+        else if (operation == 482202)
+            term->char_handler = guac_terminal_open_pipe_stream;
+
+        /* Close pipe stream OSC */
+        else if (operation == 482203)
+            term->char_handler = guac_terminal_close_pipe_stream;
 
         /* Reset parameter for next OSC */
         operation = 0;

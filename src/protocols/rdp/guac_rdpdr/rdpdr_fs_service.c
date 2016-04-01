@@ -23,13 +23,15 @@
 
 #include "config.h"
 
-#include "client.h"
+#include "rdp.h"
 #include "rdpdr_fs_messages.h"
 #include "rdpdr_messages.h"
 #include "rdpdr_service.h"
 
 #include <freerdp/utils/svc_plugin.h>
 #include <guacamole/client.h>
+#include <guacamole/protocol.h>
+#include <guacamole/socket.h>
 
 #ifdef ENABLE_WINPR
 #include <winpr/stream.h>
@@ -133,7 +135,8 @@ static void guac_rdpdr_device_fs_free_handler(guac_rdpdr_device* device) {
 
 void guac_rdpdr_register_fs(guac_rdpdrPlugin* rdpdr) {
 
-    rdp_guac_client_data* data = (rdp_guac_client_data*) rdpdr->client->data;
+    guac_client* client = rdpdr->client;
+    guac_rdp_client* rdp_client = (guac_rdp_client*) client->data;
     int id = rdpdr->devices_registered++;
 
     /* Get new device */
@@ -150,7 +153,10 @@ void guac_rdpdr_register_fs(guac_rdpdrPlugin* rdpdr) {
     device->free_handler      = guac_rdpdr_device_fs_free_handler;
 
     /* Init data */
-    device->data = data->filesystem;
+    device->data = rdp_client->filesystem;
+
+    /* Announce filesystem to owner */
+    guac_client_for_owner(client, guac_rdp_fs_expose, rdp_client->filesystem);
 
 }
 

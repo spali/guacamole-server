@@ -27,11 +27,12 @@
 #include "config.h"
 
 #include "buffer.h"
-#include "cursor.h"
 #include "display.h"
 #include "guac_clipboard.h"
+#include "guac_cursor.h"
 #include "scrollbar.h"
 #include "types.h"
+#include "typescript.h"
 
 #include <pthread.h>
 #include <stdbool.h>
@@ -65,7 +66,49 @@
  */
 #define GUAC_TERMINAL_CLIPBOARD_MAX_LENGTH 262144
 
+/**
+ * The name of the color scheme having black foreground and white background.
+ */
+#define GUAC_TERMINAL_SCHEME_BLACK_WHITE "black-white"
+
+/**
+ * The name of the color scheme having gray foreground and black background.
+ */
+#define GUAC_TERMINAL_SCHEME_GRAY_BLACK "gray-black"
+
+/**
+ * The name of the color scheme having green foreground and black background.
+ */
+#define GUAC_TERMINAL_SCHEME_GREEN_BLACK "green-black"
+
+/**
+ * The name of the color scheme having white foreground and black background.
+ */
+#define GUAC_TERMINAL_SCHEME_WHITE_BLACK "white-black"
+
 typedef struct guac_terminal guac_terminal;
+
+/**
+ * All possible mouse cursors used by the terminal emulator.
+ */
+typedef enum guac_terminal_cursor_type {
+
+    /**
+     * A transparent (blank) cursor.
+     */
+    GUAC_TERMINAL_CURSOR_BLANK,
+
+    /**
+     * A standard I-bar cursor for selecting text, etc.
+     */
+    GUAC_TERMINAL_CURSOR_IBAR,
+
+    /**
+     * A standard triangular mouse pointer for manipulating non-text objects.
+     */
+    GUAC_TERMINAL_CURSOR_POINTER
+
+} guac_terminal_cursor_type;
 
 /**
  * Handler for characters printed to the terminal. When a character is printed,
@@ -91,9 +134,14 @@ typedef guac_stream* guac_terminal_file_download_handler(guac_client* client, ch
 struct guac_terminal {
 
     /**
-     * The Guacamole client this terminal emulator will use for rendering.
+     * The Guacamole client associated with this terminal emulator.
      */
     guac_client* client;
+
+    /**
+     * The terminal render thread.
+     */
+    pthread_t thread;
 
     /**
      * Called whenever the necessary terminal codes are sent to change
@@ -130,6 +178,37 @@ struct guac_terminal {
     int stdin_pipe_fd[2];
 
     /**
+     * The currently-open pipe stream to which all terminal output should be
+     * written, if any. If no pipe stream is open, terminal output will be
+     * written to the terminal display, and this value will be NULL.
+     */
+    guac_stream* pipe_stream;
+
+    /**
+     * Buffer of data pending write to the pipe_stream. Data within this buffer
+     * will be flushed to the pipe_stream when either (1) the buffer is full
+     * and another character needs to be written or (2) the pipe_stream is
+     * closed.
+     */
+    char pipe_buffer[6048];
+
+    /**
+     * The number of bytes currently stored within the pipe_buffer.
+     */
+    int pipe_buffer_length;
+
+    /**
+     * The currently-active typescript recording all terminal output, or NULL
+     * if no typescript is being used for the terminal session.
+     */
+    guac_terminal_typescript* typescript;
+
+    /**
+     * Terminal-wide mouse cursor, synchronized across all users.
+     */
+    guac_common_cursor* cursor;
+
+    /**
      * Graphical representation of the current scroll state.
      */
     guac_terminal_scrollbar* scrollbar;
@@ -140,6 +219,16 @@ struct guac_terminal {
      * scrolling has occurred. Negative values are illegal.
      */
     int scroll_offset;
+
+    /**
+     * The width of the terminal, in pixels.
+     */
+    int width;
+
+    /**
+     * The height of the terminal, in pixels.
+     */
+    int height;
 
     /**
      * The width of the terminal, in characters.
@@ -319,24 +408,9 @@ struct guac_terminal {
     int mouse_mask;
 
     /**
-     * The cached pointer cursor.
+     * The current mouse cursor, to avoid re-setting the cursor image.
      */
-    guac_terminal_cursor* pointer_cursor;
-
-    /**
-     * The cached I-bar cursor.
-     */
-    guac_terminal_cursor* ibar_cursor;
-
-    /**
-     * The cached invisible (blank) cursor.
-     */
-    guac_terminal_cursor* blank_cursor;
-
-    /**
-     * The current cursor, used to avoid re-setting the cursor.
-     */
-    guac_terminal_cursor* current_cursor;
+    guac_terminal_cursor_type current_cursor;
 
     /**
      * The current contents of the clipboard.
@@ -348,10 +422,40 @@ struct guac_terminal {
 /**
  * Creates a new guac_terminal, having the given width and height, and
  * rendering to the given client.
+ *
+ * @param client
+ *     The client to which the terminal will be rendered.
+ *
+ * @param font_name
+ *     The name of the font to use when rendering glyphs.
+ *
+ * @param font_size
+ *     The size of each glyph, in points.
+ *
+ * @param dpi
+ *     The DPI of the display. The given font size will be adjusted to produce
+ *     glyphs at the given DPI.
+ *
+ * @param width
+ *     The width of the terminal, in pixels.
+ *
+ * @param height
+ *     The height of the terminal, in pixels.
+ *
+ * @param color_scheme
+ *     The name of the color scheme to use. This string must be one of the
+ *     names defined by the GUAC_TERMINAL_SCHEME_* constants. If blank or NULL,
+ *     the default scheme of GUAC_TERMINAL_SCHEME_GRAY_BLACK will be used. If
+ *     invalid, a warning will be logged, and the terminal will fall back on
+ *     GUAC_TERMINAL_SCHEME_GRAY_BLACK.
+ *
+ * @return
+ *     A new guac_terminal having the given font, dimensions, and attributes
+ *     which renders all text to the given client.
  */
 guac_terminal* guac_terminal_create(guac_client* client,
         const char* font_name, int font_size, int dpi,
-        int width, int height);
+        int width, int height, const char* color_scheme);
 
 /**
  * Frees all resources associated with the given terminal.
@@ -392,11 +496,29 @@ int guac_terminal_write_stdout(guac_terminal* terminal, const char* c, int size)
 int guac_terminal_notify(guac_terminal* terminal);
 
 /**
- * Reads a single line from this terminal's STDIN. Input is retrieved in
- * the same manner as guac_terminal_read_stdin() and the same restrictions
- * apply.
+ * Reads a single line from this terminal's STDIN, storing the result in a
+ * newly-allocated string. Input is retrieved in the same manner as
+ * guac_terminal_read_stdin() and the same restrictions apply.
+ *
+ * @param terminal
+ *     The terminal to which the provided title should be output, and from
+ *     whose STDIN the single line of input should be read.
+ *
+ * @param title
+ *     The human-readable title to output to the terminal just prior to reading
+ *     from STDIN.
+ *
+ * @param echo
+ *     Non-zero if the characters read from STDIN should be echoed back as
+ *     terminal output, or zero if asterisks should be displayed instead.
+ *
+ * @return
+ *     A newly-allocated string containing a single line of input read from the
+ *     provided terminal's STDIN. This string must eventually be manually
+ *     freed with a call to free().
  */
-void guac_terminal_prompt(guac_terminal* terminal, const char* title, char* str, int size, bool echo);
+char* guac_terminal_prompt(guac_terminal* terminal, const char* title,
+        bool echo);
 
 /**
  * Writes the given format string and arguments to this terminal's STDOUT in
@@ -415,7 +537,8 @@ int guac_terminal_send_key(guac_terminal* term, int keysym, int pressed);
  * Handles the given mouse event, sending data, scrolling, pasting clipboard
  * data, etc. as necessary.
  */
-int guac_terminal_send_mouse(guac_terminal* term, int x, int y, int mask);
+int guac_terminal_send_mouse(guac_terminal* term, guac_user* user,
+        int x, int y, int mask);
 
 /**
  * Handles a scroll event received from the scrollbar associated with a
@@ -441,6 +564,23 @@ void guac_terminal_clipboard_reset(guac_terminal* term, const char* mimetype);
  */
 void guac_terminal_clipboard_append(guac_terminal* term, const void* data, int length);
 
+/**
+ * Replicates the current display state to a user that has just joined the
+ * connection. All instructions necessary to replicate state are sent over the
+ * given socket.
+ *
+ * @param term
+ *     The terminal emulator associated with the connection being joined.
+ *
+ * @param user
+ *     The user joining the connection.
+ *
+ * @param socket
+ *     The guac_socket specific to the joining user and across which messages
+ *     synchronizing the current display state should be sent.
+ */
+void guac_terminal_dup(guac_terminal* term, guac_user* user,
+        guac_socket* socket);
 
 /* INTERNAL FUNCTIONS */
 
@@ -605,6 +745,91 @@ void guac_terminal_clear_tabs(guac_terminal* term);
  * next tabstop (or the rightmost character, if no more tabstops exist).
  */
 int guac_terminal_next_tab(guac_terminal* term, int column);
+
+/**
+ * Opens a new pipe stream, redirecting all output from the given terminal to
+ * that pipe stream. If a pipe stream is already open, that pipe stream will
+ * be flushed and closed prior to opening the new pipe stream.
+ *
+ * @param term
+ *     The terminal which should redirect output to a new pipe stream having
+ *     the given name.
+ *
+ * @param name
+ *     The name of the pipe stream to open.
+ */
+void guac_terminal_pipe_stream_open(guac_terminal* term, const char* name);
+
+/**
+ * Writes a single byte of data to the pipe stream currently open and
+ * associated with the given terminal. The pipe stream must already have been
+ * opened via guac_terminal_pipe_stream_open(). If no pipe stream is currently
+ * open, this function has no effect. Data written through this function may
+ * be buffered.
+ *
+ * @param term
+ *     The terminal whose currently-open pipe stream should be written to.
+ *
+ * @param c
+ *     The byte of data to write to the pipe stream.
+ */
+void guac_terminal_pipe_stream_write(guac_terminal* term, char c);
+
+/**
+ * Flushes any data currently buffered for the currently-open pipe stream
+ * associated with the given terminal. The pipe stream must already have been
+ * opened via guac_terminal_pipe_stream_open(). If no pipe stream is currently
+ * open or no data is in the buffer, this function has no effect.
+ *
+ * @param term
+ *     The terminal whose pipe stream buffer should be flushed.
+ */
+void guac_terminal_pipe_stream_flush(guac_terminal* term);
+
+/**
+ * Closes the currently-open pipe stream associated with the given terminal,
+ * redirecting all output back to the terminal display.  Any data currently
+ * buffered for output to the pipe stream will be flushed prior to closure. The
+ * pipe stream must already have been opened via
+ * guac_terminal_pipe_stream_open(). If no pipe stream is currently open, this
+ * function has no effect.
+ *
+ * @param term
+ *     The terminal whose currently-open pipe stream should be closed.
+ */
+void guac_terminal_pipe_stream_close(guac_terminal* term);
+
+/**
+ * Requests that the terminal write all output to a new pair of typescript
+ * files within the given path and using the given base name. Terminal output
+ * will be written to these new files, along with timing information. If the
+ * create_path flag is non-zero, the given path will be created if it does not
+ * yet exist. If creation of the typescript files or path fails, error messages
+ * will automatically be logged, and no typescript will be written. The
+ * typescript will automatically be closed once the terminal is freed.
+ *
+ * @param term
+ *     The terminal whose output should be written to a typescript.
+ *
+ * @param path
+ *     The full absolute path to a directory in which the typescript files
+ *     should be created.
+ *
+ * @param name
+ *     The base name to use for the typescript files created within the
+ *     specified path.
+ *
+ * @param create_path
+ *     Zero if the specified path MUST exist for typescript files to be
+ *     written, or non-zero if the path should be created if it does not yet
+ *     exist.
+ *
+ * @return
+ *     Zero if the typescript files have been successfully created and a
+ *     typescript will be written, non-zero otherwise.
+ */
+int guac_terminal_create_typescript(guac_terminal* term, const char* path,
+        const char* name, int create_path);
 
 #endif
 

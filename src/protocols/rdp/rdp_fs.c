@@ -24,6 +24,7 @@
 
 #include "rdp_fs.h"
 #include "rdp_status.h"
+#include "rdp_stream.h"
 
 #include <dirent.h>
 #include <errno.h>
@@ -34,11 +35,31 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/statvfs.h>
+#include <sys/types.h>
 #include <unistd.h>
 
+#include <guacamole/client.h>
+#include <guacamole/object.h>
 #include <guacamole/pool.h>
+#include <guacamole/socket.h>
+#include <guacamole/user.h>
 
-guac_rdp_fs* guac_rdp_fs_alloc(guac_client* client, const char* drive_path) {
+guac_rdp_fs* guac_rdp_fs_alloc(guac_client* client, const char* drive_path,
+        int create_drive_path) {
+
+    /* Create drive path if it does not exist */
+    if (create_drive_path) {
+        guac_client_log(client, GUAC_LOG_DEBUG,
+               "%s: Creating directory \"%s\" if necessary.",
+               __func__, drive_path);
+
+        /* Log error if directory creation fails */
+        if (mkdir(drive_path, S_IRWXU) && errno != EEXIST) {
+            guac_client_log(client, GUAC_LOG_ERROR,
+                    "Unable to create directory \"%s\": %s",
+                    drive_path, strerror(errno));
+        }
+    }
 
     guac_rdp_fs* fs = malloc(sizeof(guac_rdp_fs));
 
@@ -57,10 +78,51 @@ void guac_rdp_fs_free(guac_rdp_fs* fs) {
     free(fs);
 }
 
+guac_object* guac_rdp_fs_alloc_object(guac_rdp_fs* fs, guac_user* user) {
+
+    /* Init filesystem */
+    guac_object* fs_object = guac_user_alloc_object(user);
+    fs_object->get_handler = guac_rdp_download_get_handler;
+    fs_object->put_handler = guac_rdp_upload_put_handler;
+    fs_object->data = fs;
+
+    /* Send filesystem to user */
+    guac_protocol_send_filesystem(user->socket, fs_object, "Shared Drive");
+    guac_socket_flush(user->socket);
+
+    return fs_object;
+
+}
+
+void* guac_rdp_fs_expose(guac_user* user, void* data) {
+
+    guac_rdp_fs* fs = (guac_rdp_fs*) data;
+
+    /* No need to expose if there is no filesystem or the user has left */
+    if (user == NULL || fs == NULL)
+        return NULL;
+
+    /* Allocate and expose filesystem object for user */
+    return guac_rdp_fs_alloc_object(fs, user);
+
+}
+
 /**
- * Translates an absolute Windows virtual_path to an absolute virtual_path
- * which is within the "drive virtual_path" specified in the connection
- * settings.
+ * Translates an absolute Windows path to an absolute path which is within the
+ * "drive path" specified in the connection settings. No checking is performed
+ * on the path provided, which is assumed to have already been normalized and
+ * validated as absolute.
+ *
+ * @param fs
+ *     The filesystem containing the file whose path is being translated.
+ *
+ * @param virtual_path
+ *     The absolute path to the file on the simulated filesystem, relative to
+ *     the simulated filesystem root.
+ *
+ * @param real_path
+ *     The buffer in which to store the absolute path to the real file on the
+ *     local filesystem.
  */
 static void __guac_rdp_fs_translate_path(guac_rdp_fs* fs,
         const char* virtual_path, char* real_path) {
@@ -176,7 +238,7 @@ int guac_rdp_fs_open(guac_rdp_fs* fs, const char* path,
         path = "\\";
 
     /* If path is relative, the file does not exist */
-    else if (path[0] != '\\') {
+    else if (path[0] != '\\' && path[0] != '/') {
         guac_client_log(fs->client, GUAC_LOG_DEBUG,
                 "%s: Access denied - supplied path \"%s\" is relative.",
                 __func__, path);
@@ -678,13 +740,75 @@ int guac_rdp_fs_get_info(guac_rdp_fs* fs, guac_rdp_fs_info* info) {
     /* Read FS information */
     struct statvfs fs_stat;
     if (statvfs(fs->drive_path, &fs_stat))
-        return guac_rdp_fs_get_status(errno);
+        return guac_rdp_fs_get_errorcode(errno);
 
     /* Assign to structure */
     info->blocks_available = fs_stat.f_bfree;
     info->blocks_total = fs_stat.f_blocks;
     info->block_size = fs_stat.f_bsize;
     return 0;
+
+}
+
+int guac_rdp_fs_append_filename(char* fullpath, const char* path,
+        const char* filename) {
+
+    int i;
+
+    /* Disallow "." as a filename */
+    if (strcmp(filename, ".") == 0)
+        return 0;
+
+    /* Disallow ".." as a filename */
+    if (strcmp(filename, "..") == 0)
+        return 0;
+
+    /* Copy path, append trailing slash */
+    for (i=0; i<GUAC_RDP_FS_MAX_PATH; i++) {
+
+        /*
+         * Append trailing slash only if:
+         *  1) Trailing slash is not already present
+         *  2) Path is non-empty
+         */
+
+        char c = path[i];
+        if (c == '\0') {
+            if (i > 0 && path[i-1] != '/' && path[i-1] != '\\')
+                fullpath[i++] = '/';
+            break;
+        }
+
+        /* Copy character if not end of string */
+        fullpath[i] = c;
+
+    }
+
+    /* Append filename */
+    for (; i<GUAC_RDP_FS_MAX_PATH; i++) {
+
+        char c = *(filename++);
+        if (c == '\0')
+            break;
+
+        /* Filenames may not contain slashes */
+        if (c == '\\' || c == '/')
+            return 0;
+
+        /* Append each character within filename */
+        fullpath[i] = c;
+
+    }
+
+    /* Verify path length is within maximum */
+    if (i == GUAC_RDP_FS_MAX_PATH)
+        return 0;
+
+    /* Terminate path string */
+    fullpath[i] = '\0';
+
+    /* Append was successful */
+    return 1;
 
 }
 

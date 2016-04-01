@@ -32,6 +32,7 @@
  */
 
 #include "layer-types.h"
+#include "object-types.h"
 #include "protocol-types.h"
 #include "socket-types.h"
 #include "stream-types.h"
@@ -129,10 +130,19 @@ int guac_protocol_send_log(guac_socket* socket, const char* format, ...);
  * If an error occurs sending the instruction, a non-zero value is
  * returned, and guac_error is set appropriately.
  *
- * @param socket The guac_socket connection to use.
- * @param format A printf-style format string to log.
- * @param ap The va_list containing the arguments to be used when filling the
- *           format string for printing.
+ * @param socket
+ *     The guac_socket connection to use.
+ *
+ * @param format
+ *     A printf-style format string to log.
+ *
+ * @param args
+ *     The va_list containing the arguments to be used when filling the
+ *     format string for printing.
+ *
+ * @return
+ *     Zero if the instruction was sent successfully, non-zero if an error
+ *     occurs.
  */
 int vguac_protocol_send_log(guac_socket* socket, const char* format,
         va_list args);
@@ -217,6 +227,75 @@ int guac_protocol_send_select(guac_socket* socket, const char* protocol);
  */
 int guac_protocol_send_sync(guac_socket* socket, guac_timestamp timestamp);
 
+/* OBJECT INSTRUCTIONS */
+
+/**
+ * Sends a body instruction over the given guac_socket connection.
+ *
+ * If an error occurs sending the instruction, a non-zero value is
+ * returned, and guac_error is set appropriately.
+ *
+ * @param socket
+ *     The guac_socket connection to use.
+ *
+ * @param object
+ *     The object to associated with the stream being used.
+ *
+ * @param stream
+ *     The stream to use.
+ *
+ * @param mimetype
+ *     The mimetype of the data being sent.
+ *
+ * @param name
+ *     The name of the stream whose body is being sent, as requested by a "get"
+ *     instruction.
+ *
+ * @return
+ *     Zero on success, non-zero on error.
+ */
+int guac_protocol_send_body(guac_socket* socket, const guac_object* object,
+        const guac_stream* stream, const char* mimetype, const char* name);
+
+/**
+ * Sends a filesystem instruction over the given guac_socket connection.
+ *
+ * If an error occurs sending the instruction, a non-zero value is
+ * returned, and guac_error is set appropriately.
+ *
+ * @param socket
+ *     The guac_socket connection to use.
+ *
+ * @param object
+ *     The object representing the filesystem being exposed.
+ *
+ * @param name
+ *     A name describing the filesystem being exposed.
+ *
+ * @return
+ *     Zero on success, non-zero on error.
+ */
+int guac_protocol_send_filesystem(guac_socket* socket,
+        const guac_object* object, const char* name);
+
+/**
+ * Sends an undefine instruction over the given guac_socket connection.
+ *
+ * If an error occurs sending the instruction, a non-zero value is
+ * returned, and guac_error is set appropriately.
+ *
+ * @param socket
+ *     The guac_socket connection to use.
+ *
+ * @param object
+ *     The object being undefined.
+ *
+ * @return
+ *     Zero on success, non-zero on error.
+ */
+int guac_protocol_send_undefine(guac_socket* socket,
+        const guac_object* object);
+
 /* MEDIA INSTRUCTIONS */
 
 /**
@@ -225,15 +304,20 @@ int guac_protocol_send_sync(guac_socket* socket, guac_timestamp timestamp);
  * If an error occurs sending the instruction, a non-zero value is
  * returned, and guac_error is set appropriately.
  *
- * @param socket The guac_socket connection to use.
- * @param stream The stream to use.
- * @param channel The index of the audio channel to use.
- * @param mimetype The mimetype of the data being sent.
- * @param duration The duration of the sound being sent, in milliseconds.
- * @return Zero on success, non-zero on error.
+ * @param socket
+ *     The guac_socket connection to use when sending the audio instruction.
+ *
+ * @param stream
+ *     The stream to use for future audio data.
+ *
+ * @param mimetype
+ *     The mimetype of the audio data which will be sent over the given stream.
+ *
+ * @return
+ *     Zero on success, non-zero on error.
  */
 int guac_protocol_send_audio(guac_socket* socket, const guac_stream* stream,
-        int channel, const char* mimetype, double duration);
+        const char* mimetype);
 
 /**
  * Sends a file instruction over the given guac_socket connection.
@@ -280,7 +364,7 @@ int guac_protocol_send_pipe(guac_socket* socket, const guac_stream* stream,
  * @return Zero on success, non-zero on error.
  */
 int guac_protocol_send_blob(guac_socket* socket, const guac_stream* stream,
-        void* data, int count);
+        const void* data, int count);
 
 /**
  * Sends an end instruction over the given guac_socket connection.
@@ -300,15 +384,23 @@ int guac_protocol_send_end(guac_socket* socket, const guac_stream* stream);
  * If an error occurs sending the instruction, a non-zero value is
  * returned, and guac_error is set appropriately.
  *
- * @param socket The guac_socket connection to use.
- * @param stream The stream to use.
- * @param layer The destination layer.
- * @param mimetype The mimetype of the data being sent.
- * @param duration The duration of the video being sent, in milliseconds.
- * @return Zero on success, non-zero on error.
+ * @param socket
+ *     The guac_socket connection to use when sending the video instruction.
+ *
+ * @param stream
+ *     The stream to use for future video data.
+ *
+ * @param layer
+ *     The destination layer on which the streamed video should be played.
+ *
+ * @param mimetype
+ *     The mimetype of the video data which will be sent over the given stream.
+ *
+ * @return
+ *     Zero on success, non-zero on error.
  */
 int guac_protocol_send_video(guac_socket* socket, const guac_stream* stream,
-        const guac_layer* layer, const char* mimetype, double duration);
+        const guac_layer* layer, const char* mimetype);
 
 /* DRAWING INSTRUCTIONS */
 
@@ -525,22 +617,41 @@ int guac_protocol_send_lstroke(guac_socket* socket,
         const guac_layer* srcl);
 
 /**
- * Sends a png instruction over the given guac_socket connection. The PNG image
- * data given will be automatically base64-encoded for transmission.
+ * Sends an img instruction over the given guac_socket connection.
  *
  * If an error occurs sending the instruction, a non-zero value is
  * returned, and guac_error is set appropriately.
  *
- * @param socket The guac_socket connection to use.
- * @param mode The composite mode to use.
- * @param layer The destination layer.
- * @param x The destination X coordinate.
- * @param y The destination Y coordinate.
- * @param surface A cairo surface containing the image data to send.
- * @return Zero on success, non-zero on error.
+ * @param socket
+ *     The guac_socket connection to use when sending the img instruction.
+ *
+ * @param stream
+ *     The stream over which the image data will be sent.
+ *
+ * @param mode
+ *     The composite mode to use when drawing the image over the destination
+ *     layer.
+ *
+ * @param layer
+ *     The destination layer.
+ *
+ * @param mimetype
+ *     The mimetype of the image data being sent.
+ *
+ * @param x
+ *     The X coordinate of the upper-left corner of the destination rectangle
+ *     within the destination layer, in pixels.
+ *
+ * @param y
+ *     The Y coordinate of the upper-left corner of the destination rectangle
+ *     within the destination layer, in pixels.
+ *
+ * @return
+ *     Zero if the instruction was successfully sent, non-zero on error.
  */
-int guac_protocol_send_png(guac_socket* socket, guac_composite_mode mode,
-        const guac_layer* layer, int x, int y, cairo_surface_t* surface);
+int guac_protocol_send_img(guac_socket* socket, const guac_stream* stream,
+        guac_composite_mode mode, const guac_layer* layer,
+        const char* mimetype, int x, int y);
 
 /**
  * Sends a pop instruction over the given guac_socket connection.

@@ -22,181 +22,170 @@
 
 #include "config.h"
 
-#ifdef ENABLE_OGG
-#include "ogg_encoder.h"
-#endif
-
-#include "wav_encoder.h"
+#include "raw_encoder.h"
 
 #include <guacamole/audio.h>
 #include <guacamole/client.h>
 #include <guacamole/protocol.h>
 #include <guacamole/stream.h>
+#include <guacamole/user.h>
 
 #include <stdlib.h>
 #include <string.h>
 
-guac_audio_stream* guac_audio_stream_alloc(guac_client* client, guac_audio_encoder* encoder) {
+/**
+ * Assigns a new audio encoder to the given guac_audio_stream based on the
+ * audio mimetypes declared as supported by the given user. If no audio encoder
+ * can be found, no new audio encoder is assigned, and the existing encoder is
+ * left untouched (if any).
+ *
+ * @param owner
+ *     The user whose supported audio mimetypes should determine the audio
+ *     encoder selected. It is expected that this user will be the owner of
+ *     the connection.
+ *
+ * @param data
+ *     The guac_audio_stream to which the new encoder should be assigned.
+ *     Existing properties set on this audio stream, such as the bits per
+ *     sample, may affect the encoder chosen.
+ *
+ * @return
+ *     The assigned audio encoder. If no new audio encoder can be assigned,
+ *     this will be the currently-assigned audio encoder (which may be NULL).
+ */
+static void* guac_audio_assign_encoder(guac_user* owner, void* data) {
+
+    int i;
+
+    guac_audio_stream* audio = (guac_audio_stream*) data;
+    int bps = audio->bps;
+
+    /* If there is no owner, do not attempt to assign a new encoder */
+    if (owner == NULL)
+        return audio->encoder;
+
+    /* For each supported mimetype, check for an associated encoder */
+    for (i=0; owner->info.audio_mimetypes[i] != NULL; i++) {
+
+        const char* mimetype = owner->info.audio_mimetypes[i];
+
+        /* If 16-bit raw audio is supported, done. */
+        if (bps == 16 && strcmp(mimetype, raw16_encoder->mimetype) == 0) {
+            audio->encoder = raw16_encoder;
+            break;
+        }
+
+        /* If 8-bit raw audio is supported, done. */
+        if (bps == 8 && strcmp(mimetype, raw8_encoder->mimetype) == 0) {
+            audio->encoder = raw8_encoder;
+            break;
+        }
+
+    } /* end for each mimetype */
+
+    /* Return assigned encoder, if any */
+    return audio->encoder;
+
+}
+
+guac_audio_stream* guac_audio_stream_alloc(guac_client* client,
+        guac_audio_encoder* encoder, int rate, int channels, int bps) {
 
     guac_audio_stream* audio;
 
-    /* Choose an encoding if not specified */
-    if (encoder == NULL) {
-
-        int i;
-
-        /* For each supported mimetype, check for an associated encoder */
-        for (i=0; client->info.audio_mimetypes[i] != NULL; i++) {
-
-            const char* mimetype = client->info.audio_mimetypes[i];
-
-#ifdef ENABLE_OGG
-            /* If Ogg is supported, done. */
-            if (strcmp(mimetype, ogg_encoder->mimetype) == 0) {
-                encoder = ogg_encoder;
-                break;
-            }
-#endif
-
-            /* If wav is supported, done. */
-            if (strcmp(mimetype, wav_encoder->mimetype) == 0) {
-                encoder = wav_encoder;
-                break;
-            }
-
-        } /* end for each mimetype */
-
-        /* If still no encoder could be found, fail */
-        if (encoder == NULL)
-            return NULL;
-
-    }
-
     /* Allocate stream */
-    audio = (guac_audio_stream*) malloc(sizeof(guac_audio_stream));
+    audio = (guac_audio_stream*) calloc(1, sizeof(guac_audio_stream));
     audio->client = client;
-
-    /* Reset buffer stats */
-    audio->used = 0;
-    audio->length = 0x40000;
-
-    audio->encoded_data_used = 0;
-    audio->encoded_data_length = 0x40000;
-
-    /* Allocate buffers */
-    audio->pcm_data = malloc(audio->length);
-    audio->encoded_data = malloc(audio->encoded_data_length);
-
-    /* Assign encoder */
-    audio->encoder = encoder;
     audio->stream = guac_client_alloc_stream(client);
-
-    return audio;
-}
-
-void guac_audio_stream_begin(guac_audio_stream* audio, int rate, int channels, int bps) {
 
     /* Load PCM properties */
     audio->rate = rate;
     audio->channels = channels;
     audio->bps = bps;
 
-    /* Reset write counter */
-    audio->pcm_bytes_written = 0;
+    /* Assign encoder for owner, abort if no encoder can be found */
+    if (!guac_client_for_owner(client, guac_audio_assign_encoder, audio)) {
+        guac_client_free_stream(client, audio->stream);
+        free(audio);
+        return NULL;
+    }
 
-    /* Call handler */
-    audio->encoder->begin_handler(audio);
+    /* Call handler, if defined */
+    if (audio->encoder->begin_handler)
+        audio->encoder->begin_handler(audio);
+
+    return audio;
 
 }
 
-void guac_audio_stream_end(guac_audio_stream* audio) {
+void guac_audio_stream_reset(guac_audio_stream* audio,
+        guac_audio_encoder* encoder, int rate, int channels, int bps) {
 
-    double duration;
+    /* Do nothing if nothing is changing */
+    if ((encoder == NULL || encoder == audio->encoder)
+            && rate     == audio->rate
+            && channels == audio->channels
+            && bps      == audio->bps) {
+        return;
+    }
 
-    /* Flush stream and finish encoding */
-    guac_audio_stream_flush(audio);
-    audio->encoder->end_handler(audio);
+    /* Free old encoder data */
+    if (audio->encoder->end_handler)
+        audio->encoder->end_handler(audio);
 
-    /* Calculate duration of PCM data */
-    duration = ((double) (audio->pcm_bytes_written * 1000 * 8))
-                / audio->rate / audio->channels / audio->bps;
+    /* Assign new encoder, if changed */
+    if (encoder != NULL)
+        audio->encoder = encoder;
 
-    /* Send audio */
-    guac_protocol_send_audio(audio->client->socket, audio->stream,
-            audio->stream->index, audio->encoder->mimetype, duration);
+    /* Set PCM properties */
+    audio->rate = rate;
+    audio->channels = channels;
+    audio->bps = bps;
 
-    guac_protocol_send_blob(audio->client->socket, audio->stream,
-            audio->encoded_data, audio->encoded_data_used);
+    /* Init encoder with new data */
+    if (audio->encoder->begin_handler)
+        audio->encoder->begin_handler(audio);
 
-    guac_protocol_send_end(audio->client->socket, audio->stream);
+}
 
-    /* Clear data */
-    audio->encoded_data_used = 0;
+void guac_audio_stream_add_user(guac_audio_stream* audio, guac_user* user) {
+
+    guac_audio_encoder* encoder = audio->encoder;
+
+    /* Notify encoder that a new user is present */
+    if (encoder->join_handler)
+        encoder->join_handler(audio, user);
 
 }
 
 void guac_audio_stream_free(guac_audio_stream* audio) {
-    free(audio->pcm_data);
+
+    /* Flush stream encoding */
+    guac_audio_stream_flush(audio);
+
+    /* Clean up encoder */
+    if (audio->encoder->end_handler)
+        audio->encoder->end_handler(audio);
+
+    /* Free associated data */
     free(audio);
+
 }
 
 void guac_audio_stream_write_pcm(guac_audio_stream* audio, 
         const unsigned char* data, int length) {
 
-    /* Update counter */
-    audio->pcm_bytes_written += length;
-
-    /* Resize audio buffer if necessary */
-    if (length > audio->length) {
-
-        /* Resize to double provided length */
-        audio->length = length*2;
-        audio->pcm_data = realloc(audio->pcm_data, audio->length);
-
-    }
-
-    /* Flush if necessary */
-    if (audio->used + length > audio->length)
-        guac_audio_stream_flush(audio);
-
-    /* Append to buffer */
-    memcpy(&(audio->pcm_data[audio->used]), data, length);
-    audio->used += length;
+    /* Write data */
+    if (audio->encoder->write_handler)
+        audio->encoder->write_handler(audio, data, length);
 
 }
 
 void guac_audio_stream_flush(guac_audio_stream* audio) {
 
-    /* If data in buffer */
-    if (audio->used != 0) {
-
-        /* Write data */
-        audio->encoder->write_handler(audio,
-                audio->pcm_data, audio->used);
-
-        /* Reset buffer */
-        audio->used = 0;
-
-    }
-
-}
-
-void guac_audio_stream_write_encoded(guac_audio_stream* audio,
-        const unsigned char* data, int length) {
-
-    /* Resize audio buffer if necessary */
-    if (audio->encoded_data_used + length > audio->encoded_data_length) {
-
-        /* Increase to double concatenated size to accomodate */
-        audio->encoded_data_length = (audio->encoded_data_length + length)*2;
-        audio->encoded_data = realloc(audio->encoded_data,
-                audio->encoded_data_length);
-
-    }
-
-    /* Append to buffer */
-    memcpy(&(audio->encoded_data[audio->encoded_data_used]), data, length);
-    audio->encoded_data_used += length;
+    /* Flush any buffered data */
+    if (audio->encoder->flush_handler)
+        audio->encoder->flush_handler(audio);
 
 }
 

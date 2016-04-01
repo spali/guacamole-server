@@ -22,22 +22,15 @@
 
 #include "config.h"
 
-#include "client.h"
-#include "client-map.h"
+#include "connection.h"
 #include "conf-args.h"
 #include "conf-file.h"
 #include "log.h"
-
-#include <guacamole/client.h>
-#include <guacamole/error.h>
-#include <guacamole/instruction.h>
-#include <guacamole/plugin.h>
-#include <guacamole/protocol.h>
-#include <guacamole/socket.h>
+#include "proc-map.h"
+#include "user.h"
 
 #ifdef ENABLE_SSL
 #include <openssl/ssl.h>
-#include "socket-ssl.h"
 #endif
 
 #include <errno.h>
@@ -59,265 +52,21 @@
 #define GUACD_ROOT     "/"
 
 /**
- * Logs a reasonable explanatory message regarding handshake failure based on
- * the current value of guac_error.
+ * Redirects the given file descriptor to /dev/null. The given flags must match
+ * the read/write flags of the file descriptor given (if the given file
+ * descriptor was opened write-only, flags here must be O_WRONLY, etc.).
+ *
+ * @param fd
+ *     The file descriptor to redirect to /dev/null.
+ *
+ * @param flags
+ *     The flags to use when opening /dev/null as the target for redirection.
+ *     These flags must match the flags of the file descriptor given.
+ *
+ * @return
+ *     Zero on success, non-zero if redirecting the file descriptor fails.
  */
-static void guacd_log_handshake_failure() {
-
-    if (guac_error == GUAC_STATUS_CLOSED)
-        guacd_log(GUAC_LOG_INFO,
-                "Guacamole connection closed during handshake");
-    else if (guac_error == GUAC_STATUS_PROTOCOL_ERROR)
-        guacd_log(GUAC_LOG_ERROR,
-                "Guacamole protocol violation. Perhaps the version of "
-                "guacamole-client is incompatible with this version of "
-                "guacd?");
-    else
-        guacd_log(GUAC_LOG_WARNING,
-                "Guacamole handshake failed: %s",
-                guac_status_string(guac_error));
-
-}
-
-/**
- * Creates a new guac_client for the connection on the given socket, adding
- * it to the client map based on its ID.
- */
-static void guacd_handle_connection(guacd_client_map* map, guac_socket* socket) {
-
-    guac_client* client;
-    guac_client_plugin* plugin;
-    guac_instruction* select;
-    guac_instruction* size;
-    guac_instruction* audio;
-    guac_instruction* video;
-    guac_instruction* connect;
-    int init_result;
-
-    /* Reset guac_error */
-    guac_error = GUAC_STATUS_SUCCESS;
-    guac_error_message = NULL;
-
-    /* Get protocol from select instruction */
-    select = guac_instruction_expect(socket, GUACD_USEC_TIMEOUT, "select");
-    if (select == NULL) {
-
-        /* Log error */
-        guacd_log_handshake_failure();
-        guacd_log_guac_error(GUAC_LOG_DEBUG,
-                "Error reading \"select\"");
-
-        /* Free resources */
-        guac_socket_free(socket);
-        return;
-
-    }
-
-    /* Validate args to select */
-    if (select->argc != 1) {
-
-        /* Log error */
-        guacd_log_handshake_failure();
-        guacd_log(GUAC_LOG_ERROR, "Bad number of arguments to \"select\" (%i)",
-                select->argc);
-
-        /* Free resources */
-        guac_socket_free(socket);
-        return;
-    }
-
-    guacd_log(GUAC_LOG_INFO, "Protocol \"%s\" selected", select->argv[0]);
-
-    /* Get plugin from protocol in select */
-    plugin = guac_client_plugin_open(select->argv[0]);
-    guac_instruction_free(select);
-
-    if (plugin == NULL) {
-
-        /* Log error */
-        if (guac_error == GUAC_STATUS_NOT_FOUND)
-            guacd_log(GUAC_LOG_WARNING,
-                    "Support for selected protocol is not installed");
-        else
-            guacd_log_guac_error(GUAC_LOG_ERROR,
-                    "Unable to load client plugin");
-
-        /* Free resources */
-        guac_socket_free(socket);
-        return;
-    }
-
-    /* Send args response */
-    if (guac_protocol_send_args(socket, plugin->args)
-            || guac_socket_flush(socket)) {
-
-        /* Log error */
-        guacd_log_handshake_failure();
-        guacd_log_guac_error(GUAC_LOG_DEBUG, "Error sending \"args\"");
-
-        if (guac_client_plugin_close(plugin))
-            guacd_log_guac_error(GUAC_LOG_WARNING,
-                    "Unable to close client plugin");
-
-        guac_socket_free(socket);
-        return;
-    }
-
-    /* Get optimal screen size */
-    size = guac_instruction_expect(
-            socket, GUACD_USEC_TIMEOUT, "size");
-    if (size == NULL) {
-
-        /* Log error */
-        guacd_log_handshake_failure();
-        guacd_log_guac_error(GUAC_LOG_DEBUG, "Error reading \"size\"");
-
-        /* Free resources */
-        guac_socket_free(socket);
-        return;
-    }
-
-    /* Get supported audio formats */
-    audio = guac_instruction_expect(
-            socket, GUACD_USEC_TIMEOUT, "audio");
-    if (audio == NULL) {
-
-        /* Log error */
-        guacd_log_handshake_failure();
-        guacd_log_guac_error(GUAC_LOG_DEBUG, "Error reading \"audio\"");
-
-        /* Free resources */
-        guac_socket_free(socket);
-        return;
-    }
-
-    /* Get supported video formats */
-    video = guac_instruction_expect(
-            socket, GUACD_USEC_TIMEOUT, "video");
-    if (video == NULL) {
-
-        /* Log error */
-        guacd_log_handshake_failure();
-        guacd_log_guac_error(GUAC_LOG_DEBUG, "Error reading \"video\"");
-
-        /* Free resources */
-        guac_socket_free(socket);
-        return;
-    }
-
-    /* Get args from connect instruction */
-    connect = guac_instruction_expect(
-            socket, GUACD_USEC_TIMEOUT, "connect");
-    if (connect == NULL) {
-
-        /* Log error */
-        guacd_log_handshake_failure();
-        guacd_log_guac_error(GUAC_LOG_DEBUG, "Error reading \"connect\"");
-
-        if (guac_client_plugin_close(plugin))
-            guacd_log_guac_error(GUAC_LOG_WARNING,
-                    "Unable to close client plugin");
-
-        guac_socket_free(socket);
-        return;
-    }
-
-    /* Get client */
-    client = guac_client_alloc();
-    if (client == NULL) {
-        guacd_log_guac_error(GUAC_LOG_ERROR, "Unable to create client");
-        guac_socket_free(socket);
-        return;
-    }
-
-    client->socket = socket;
-    client->log_handler = guacd_client_log;
-
-    /* Parse optimal screen dimensions from size instruction */
-    client->info.optimal_width  = atoi(size->argv[0]);
-    client->info.optimal_height = atoi(size->argv[1]);
-
-    /* If DPI given, set the client resolution */
-    if (size->argc >= 3)
-        client->info.optimal_resolution = atoi(size->argv[2]);
-
-    /* Otherwise, use a safe default for rough backwards compatibility */
-    else
-        client->info.optimal_resolution = 96;
-
-    /* Store audio mimetypes */
-    client->info.audio_mimetypes = malloc(sizeof(char*) * (audio->argc+1));
-    memcpy(client->info.audio_mimetypes, audio->argv,
-            sizeof(char*) * audio->argc);
-    client->info.audio_mimetypes[audio->argc] = NULL;
-
-    /* Store video mimetypes */
-    client->info.video_mimetypes = malloc(sizeof(char*) * (video->argc+1));
-    memcpy(client->info.video_mimetypes, video->argv,
-            sizeof(char*) * video->argc);
-    client->info.video_mimetypes[video->argc] = NULL;
-
-    /* Store client */
-    if (guacd_client_map_add(map, client))
-        guacd_log(GUAC_LOG_ERROR, "Unable to add client. Internal client storage has failed");
-
-    /* Send connection ID */
-    guacd_log(GUAC_LOG_INFO, "Connection ID is \"%s\"", client->connection_id);
-    guac_protocol_send_ready(socket, client->connection_id);
-
-    /* Init client */
-    init_result = guac_client_plugin_init_client(plugin,
-                client, connect->argc, connect->argv);
-
-    guac_instruction_free(connect);
-
-    /* If client could not be started, free everything and fail */
-    if (init_result) {
-
-        guac_client_free(client);
-
-        guacd_log_guac_error(GUAC_LOG_INFO, "Connection did not succeed");
-
-        if (guac_client_plugin_close(plugin))
-            guacd_log_guac_error(GUAC_LOG_WARNING,
-                    "Unable to close client plugin");
-
-        guac_socket_free(socket);
-        return;
-    }
-
-    /* Start client threads */
-    guacd_log(GUAC_LOG_INFO, "Starting client");
-    if (guacd_client_start(client))
-        guacd_log(GUAC_LOG_WARNING, "Client finished abnormally");
-    else
-        guacd_log(GUAC_LOG_INFO, "Client disconnected");
-
-    /* Remove client */
-    if (guacd_client_map_remove(map, client->connection_id) == NULL)
-        guacd_log(GUAC_LOG_ERROR, "Unable to remove client. Internal client storage has failed");
-
-    /* Free mimetype lists */
-    free(client->info.audio_mimetypes);
-    free(client->info.video_mimetypes);
-
-    /* Free remaining instructions */
-    guac_instruction_free(audio);
-    guac_instruction_free(video);
-    guac_instruction_free(size);
-
-    /* Clean up */
-    guac_client_free(client);
-    if (guac_client_plugin_close(plugin))
-        guacd_log_guac_error(GUAC_LOG_WARNING,
-                "Unable to close client plugin");
-
-    /* Close socket */
-    guac_socket_free(socket);
-
-}
-
-int redirect_fd(int fd, int flags) {
+static int redirect_fd(int fd, int flags) {
 
     /* Attempt to open bit bucket */
     int new_fd = open(GUACD_DEV_NULL, flags);
@@ -334,7 +83,21 @@ int redirect_fd(int fd, int flags) {
 
 }
 
-int daemonize() {
+/**
+ * Turns the current process into a daemon through a series of fork() calls.
+ * The standard I/O file desriptors for STDIN, STDOUT, and STDERR will be
+ * redirected to /dev/null, and the working directory is changed to root.
+ * Execution within the caller of this function will terminate before this
+ * function returns, while execution within the daemonized child process will
+ * continue.
+ *
+ * @return
+ *    Zero if the daemonization process succeeded and we are now in the
+ *    daemonized child process, or non-zero if daemonization failed and we are
+ *    still the original caller. This function does not return for the original
+ *    caller if daemonization succeeds.
+ */
+static int daemonize() {
 
     pid_t pid;
 
@@ -417,7 +180,7 @@ int main(int argc, char* argv[]) {
     SSL_CTX* ssl_context = NULL;
 #endif
 
-    guacd_client_map* map = guacd_client_map_alloc();
+    guacd_proc_map* map = guacd_proc_map_alloc();
 
     /* General */
     int retval;
@@ -584,16 +347,16 @@ int main(int argc, char* argv[]) {
     /* Free addresses */
     freeaddrinfo(addresses);
 
+    /* Listen for connections */
+    if (listen(socket_fd, 5) < 0) {
+        guacd_log(GUAC_LOG_ERROR, "Could not listen on socket: %s", strerror(errno));
+        return 3;
+    }
+
     /* Daemon loop */
     for (;;) {
 
-        pid_t child_pid;
-
-        /* Listen for connections */
-        if (listen(socket_fd, 5) < 0) {
-            guacd_log(GUAC_LOG_ERROR, "Could not listen on socket: %s", strerror(errno));
-            return 3;
-        }
+        pthread_t child_thread;
 
         /* Accept connection */
         client_addr_len = sizeof(client_addr);
@@ -601,59 +364,27 @@ int main(int argc, char* argv[]) {
                 (struct sockaddr*) &client_addr, &client_addr_len);
 
         if (connected_socket_fd < 0) {
-            guacd_log(GUAC_LOG_ERROR, "Could not accept client connection: %s",
-                    strerror(errno));
-            return 3;
+            guacd_log(GUAC_LOG_ERROR, "Could not accept client connection: %s", strerror(errno));
+            continue;
         }
 
-        /* 
-         * Once connection is accepted, send child into background.
-         *
-         * Note that we prefer fork() over threads for connection-handling
-         * processes as they give each connection its own memory area, and
-         * isolate the main daemon and other connections from errors in any
-         * particular client plugin.
-         */
+        /* Create parameters for connection thread */
+        guacd_connection_thread_params* params = malloc(sizeof(guacd_connection_thread_params));
+        if (params == NULL) {
+            guacd_log(GUAC_LOG_ERROR, "Could not create connection thread: %s", strerror(errno));
+            continue;
+        }
 
-        child_pid = fork();
-
-        /* If error, log */
-        if (child_pid == -1)
-            guacd_log(GUAC_LOG_ERROR, "Error forking child process: %s", strerror(errno));
-
-        /* If child, start client, and exit when finished */
-        else if (child_pid == 0) {
-
-            guac_socket* socket;
+        params->map = map;
+        params->connected_socket_fd = connected_socket_fd;
 
 #ifdef ENABLE_SSL
-
-            /* If SSL chosen, use it */
-            if (ssl_context != NULL) {
-                socket = guac_socket_open_secure(ssl_context, connected_socket_fd);
-                if (socket == NULL) {
-                    guacd_log_guac_error(GUAC_LOG_ERROR,
-                            "Unable to set up SSL/TLS");
-                    return 0;
-                }
-            }
-            else
-                socket = guac_socket_open(connected_socket_fd);
-#else
-            /* Open guac_socket */
-            socket = guac_socket_open(connected_socket_fd);
+        params->ssl_context = ssl_context;
 #endif
 
-            guacd_handle_connection(map, socket);
-            close(connected_socket_fd);
-            return 0;
-        }
-
-        /* If parent, close reference to child's descriptor */
-        else if (close(connected_socket_fd) < 0) {
-            guacd_log(GUAC_LOG_ERROR, "Error closing daemon reference to "
-                    "child descriptor: %s", strerror(errno));
-        }
+        /* Spawn thread to handle connection */
+        pthread_create(&child_thread, NULL, guacd_connection_thread, params);
+        pthread_detach(child_thread);
 
     }
 

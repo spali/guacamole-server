@@ -1,5 +1,5 @@
 #
-# Copyright (C) 2013 Glyptodon LLC
+# Copyright (C) 2015 Glyptodon LLC
 #
 # Permission is hereby granted, free of charge, to any person obtaining a copy
 # of this software and associated documentation files (the "Software"), to deal
@@ -21,7 +21,7 @@
 #
 
 AC_PREREQ([2.61])
-AC_INIT([guacamole-server], [0.9.6])
+AC_INIT([guacamole-server], [0.9.9])
 AM_INIT_AUTOMAKE([-Wall -Werror foreign subdir-objects])
 AM_SILENT_RULES([yes])
 
@@ -52,6 +52,10 @@ AC_CHECK_LIB([m], [cos],
 # libpng
 AC_CHECK_LIB([png], [png_write_png], [PNG_LIBS=-lpng],
              AC_MSG_ERROR("libpng is required for writing png messages"))
+
+# libjpeg
+AC_CHECK_LIB([jpeg], [jpeg_start_compress], [JPEG_LIBS=-ljpeg],
+             AC_MSG_ERROR("libjpeg is required for writing jpeg messages"))
 
 # Cairo
 AC_CHECK_LIB([cairo], [cairo_create], [CAIRO_LIBS=-lcairo],
@@ -87,6 +91,7 @@ AC_CHECK_LIB([wsock32], [main])
 AC_SUBST(LIBADD_DLOPEN)
 AC_SUBST(MATH_LIBS)
 AC_SUBST(PNG_LIBS)
+AC_SUBST(JPEG_LIBS)
 AC_SUBST(CAIRO_LIBS)
 AC_SUBST(PTHREAD_LIBS)
 AC_SUBST(UUID_LIBS)
@@ -117,6 +122,10 @@ AC_SUBST([LIBGUAC_INCLUDE], '-I$(top_srcdir)/src/libguac')
 AC_SUBST([COMMON_LTLIB],   '$(top_builddir)/src/common/libguac_common.la')
 AC_SUBST([COMMON_INCLUDE], '-I$(top_srcdir)/src/common')
 
+# Common base SSH client
+AC_SUBST([COMMON_SSH_LTLIB],   '$(top_builddir)/src/common-ssh/libguac_common_ssh.la')
+AC_SUBST([COMMON_SSH_INCLUDE], '-I$(top_srcdir)/src/common-ssh')
+
 # Terminal emulator
 AC_SUBST([TERMINAL_LTLIB],   '$(top_builddir)/src/terminal/libguac_terminal.la')
 AC_SUBST([TERMINAL_INCLUDE], '-I$(top_srcdir)/src/terminal $(PANGO_CFLAGS) $(PANGOCAIRO_CFLAGS) $(COMMON_INCLUDE)')
@@ -136,6 +145,63 @@ AC_ARG_WITH(guacd_conf,
             [guacd_conf=$withval],
             [guacd_conf=/etc/guacamole/guacd.conf])
 AC_DEFINE_UNQUOTED([GUACD_CONF_FILE], ["$guacd_conf"], [The full path to the guacd config file])
+
+#
+# libavcodec
+#
+
+have_libavcodec=disabled
+AC_ARG_WITH([libavcodec],
+            [AS_HELP_STRING([--with-libavcodec],
+                            [use libavcodec when encoding video @<:@default=check@:>@])],
+            [],
+            [with_libavcodec=check])
+
+if test "x$with_libavcodec" != "xno"
+then
+    have_libavcodec=yes
+    PKG_CHECK_MODULES([AVCODEC], [libavcodec],, [have_libavcodec=no]);
+fi
+
+AM_CONDITIONAL([ENABLE_AVCODEC], [test "x${have_libavcodec}" = "xyes"])
+
+#
+# libavutil
+#
+
+have_libavutil=disabled
+AC_ARG_WITH([libavutil],
+            [AS_HELP_STRING([--with-libavutil],
+                            [use libavutil when encoding video @<:@default=check@:>@])],
+            [],
+            [with_libavutil=check])
+
+if test "x$with_libavutil" != "xno"
+then
+    have_libavutil=yes
+    PKG_CHECK_MODULES([AVUTIL], [libavutil],, [have_libavutil=no]);
+fi
+
+AM_CONDITIONAL([ENABLE_AVUTIL], [test "x${have_libavutil}" = "xyes"])
+
+#
+# libswscale
+#
+
+have_libswscale=disabled
+AC_ARG_WITH([libswscale],
+            [AS_HELP_STRING([--with-libswscale],
+                            [use libswscale when encoding video @<:@default=check@:>@])],
+            [],
+            [with_libswscale=check])
+
+if test "x$with_libswscale" != "xno"
+then
+    have_libswscale=yes
+    PKG_CHECK_MODULES([SWSCALE], [libswscale],, [have_libswscale=no]);
+fi
+
+AM_CONDITIONAL([ENABLE_SWSCALE], [test "x${have_libswscale}" = "xyes"])
 
 #
 # libssl
@@ -371,7 +437,6 @@ if test "x$with_rdp" != "xno"
 then
     have_winpr=yes
     have_freerdp=yes
-    have_disp=yes
     legacy_freerdp_extensions=no
     rdpsettings_interface=unknown
     rdpsettings_audioplayback=yes
@@ -488,8 +553,7 @@ then
                      [AC_DEFINE([HAVE_FREERDP_DISPLAY_UPDATE_SUPPORT],,
                                 [Whether FreeRDP supports the display update channel])]
                      [AC_CHECK_MEMBERS([rdpSettings.SupportDisplayControl],,,
-                                       [[#include <freerdp/freerdp.h>]])],
-                     have_disp=no,
+                                       [[#include <freerdp/freerdp.h>]])],,
                      [#include <winpr/wtypes.h>
                       #include <winpr/collections.h>])
 fi
@@ -600,6 +664,7 @@ then
                       rdpSettings.Height,
                       rdpSettings.FastPathInput,
                       rdpSettings.FastPathOutput,
+                      rdpSettings.SendPreconnectionPdu,
                       rdpSettings.OrderSupport],
                      [rdpsettings_interface=stable],,
                      [[#include <freerdp/freerdp.h>]])
@@ -802,7 +867,6 @@ then
 fi
 
 AM_CONDITIONAL([LEGACY_FREERDP_EXTENSIONS], [test "x${legacy_freerdp_extensions}" = "xyes"])
-AM_CONDITIONAL([ENABLE_DISPLAY_UPDATE], [test "x${have_disp}" = "xyes"])
 AM_CONDITIONAL([ENABLE_WINPR], [test "x${have_winpr}"   = "xyes"])
 AM_CONDITIONAL([ENABLE_RDP],   [test "x${have_freerdp}" = "xyes"])
 
@@ -833,6 +897,12 @@ then
                          [SSH_LIBS="$SSH_LIBS -lssh2"],
                          [have_libssh2=no])
 fi
+
+AM_CONDITIONAL([ENABLE_COMMON_SSH], [test "x${have_libssh2}"  = "xyes" \
+                                       -a "x${have_ssl}"      = "xyes"])
+AM_COND_IF([ENABLE_COMMON_SSH],
+           [AC_DEFINE([ENABLE_COMMON_SSH],,
+                      [Whether support for the common SSH core is enabled])])
 
 AM_CONDITIONAL([ENABLE_SSH], [test "x${have_libssh2}"  = "xyes" \
                                 -a "x${have_terminal}" = "xyes" \
@@ -916,25 +986,110 @@ AM_CONDITIONAL([ENABLE_TELNET], [test "x${have_libtelnet}"  = "xyes" \
 
 AC_SUBST(TELNET_LIBS)
 
+#
+# libwebp
+#
+
+have_webp=disabled
+WEBP_LIBS=
+AC_ARG_WITH([webp],
+            [AS_HELP_STRING([--with-webp],
+                            [support WebP image encoding @<:@default=check@:>@])],
+            [],
+            [with_webp=check])
+
+if test "x$with_webp" != "xno"
+then
+    have_webp=yes
+
+    AC_CHECK_HEADER(webp/encode.h,, [have_webp=no])
+    AC_CHECK_LIB([webp], [WebPEncode], [WEBP_LIBS="$WEBP_LIBS -lwebp"], [have_webp=no])
+
+    if test "x${have_webp}" = "xno"
+    then
+        AC_MSG_WARN([
+  --------------------------------------------
+   Unable to find libwebp.
+   Images will not be encoded using WebP.
+  --------------------------------------------])
+    else
+        AC_DEFINE([ENABLE_WEBP],, [Whether WebP support is enabled])
+    fi
+fi
+
+AM_CONDITIONAL([ENABLE_WEBP], [test "x${have_webp}" = "xyes"])
+AC_SUBST(WEBP_LIBS)
+
+#
+# guacd
+#
+
+AC_ARG_ENABLE([guacd],
+              [AS_HELP_STRING([--disable-guacd],
+                              [do not build the Guacamole proxy daemon])],
+              [],
+              [enable_guacd=yes])
+
+AM_CONDITIONAL([ENABLE_GUACD], [test "x${enable_guacd}"  = "xyes"])
+
+#
+# guacenc
+#
+
+AC_ARG_ENABLE([guacenc],
+              [AS_HELP_STRING([--disable-guacenc],
+                              [do not build the Guacamole video encoding tool])],
+              [],
+              [enable_guacenc=yes])
+
+AM_CONDITIONAL([ENABLE_GUACENC], [test "x${enable_guacenc}"  = "xyes" \
+                                    -a "x${have_libavcodec}" = "xyes" \
+                                    -a "x${have_libavutil}"  = "xyes" \
+                                    -a "x${have_libswscale}" = "xyes"])
+
+#
+# Output Makefiles
+#
 
 AC_CONFIG_FILES([Makefile
                  tests/Makefile
                  src/common/Makefile
+                 src/common-ssh/Makefile
                  src/terminal/Makefile
                  src/libguac/Makefile
                  src/guacd/Makefile
+                 src/guacenc/Makefile
                  src/protocols/rdp/Makefile
                  src/protocols/ssh/Makefile
                  src/protocols/telnet/Makefile
                  src/protocols/vnc/Makefile])
 AC_OUTPUT
 
+#
+# Protocol build status
+#
+
 AM_COND_IF([ENABLE_RDP],    [build_rdp=yes],    [build_rdp=no])
 AM_COND_IF([ENABLE_SSH],    [build_ssh=yes],    [build_ssh=no])
 AM_COND_IF([ENABLE_TELNET], [build_telnet=yes], [build_telnet=no])
 AM_COND_IF([ENABLE_VNC],    [build_vnc=yes],    [build_vnc=no])
 
+#
+# Service / tool build status
+#
+
+AM_COND_IF([ENABLE_GUACD],   [build_guacd=yes],   [build_guacd=no])
+AM_COND_IF([ENABLE_GUACENC], [build_guacenc=yes], [build_guacenc=no])
+
+#
+# Init scripts
+#
+
 AM_COND_IF([ENABLE_INIT], [build_init="${init_dir}"], [build_init=no])
+
+#
+# Display summary
+#
 
 echo "
 ------------------------------------------------
@@ -945,12 +1100,16 @@ $PACKAGE_NAME version $PACKAGE_VERSION
 
      freerdp ............. ${have_freerdp}
      pango ............... ${have_pango}
+     libavcodec .......... ${have_libavcodec}
+     libavutil ........... ${have_libavutil}
      libssh2 ............. ${have_libssh2}
      libssl .............. ${have_ssl}
+     libswscale .......... ${have_libswscale}
      libtelnet ........... ${have_libtelnet}
      libVNCServer ........ ${have_libvncserver}
      libvorbis ........... ${have_vorbis}
      libpulse ............ ${have_pulse}
+     libwebp ............. ${have_webp}
 
    Protocol support:
 
@@ -958,6 +1117,11 @@ $PACKAGE_NAME version $PACKAGE_VERSION
       SSH ....... ${build_ssh}
       Telnet .... ${build_telnet}
       VNC ....... ${build_vnc}
+
+   Services / tools:
+
+      guacd ...... ${build_guacd}
+      guacenc .... ${build_guacenc}
 
    Init scripts: ${build_init}
 

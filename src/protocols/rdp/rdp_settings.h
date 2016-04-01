@@ -57,6 +57,11 @@
 #define RDP_DEFAULT_DEPTH  16 
 
 /**
+ * The filename to use for the screen recording, if not specified.
+ */
+#define GUAC_RDP_DEFAULT_RECORDING_NAME "recording"
+
+/**
  * All supported combinations of security types.
  */
 typedef enum guac_rdp_security {
@@ -82,6 +87,32 @@ typedef enum guac_rdp_security {
     GUAC_SECURITY_ANY
 
 } guac_rdp_security;
+
+/**
+ * All supported combinations screen resize methods.
+ */
+typedef enum guac_rdp_resize_method {
+
+    /**
+     * Dynamic resizing of the display will not be attempted.
+     */
+    GUAC_RESIZE_NONE,
+
+    /**
+     * Dynamic resizing will be attempted through sending requests along the
+     * Display Update channel. This will only work with recent versions of
+     * Windows and relatively-recent versions of FreeRDP.
+     */
+    GUAC_RESIZE_DISPLAY_UPDATE,
+
+    /**
+     * Guacamole will automatically disconnect and reconnect to the RDP server
+     * whenever the screen size changes, requesting the new size during
+     * reconnect.
+     */
+    GUAC_RESIZE_RECONNECT
+
+} guac_rdp_resize_method;
 
 /**
  * All settings supported by the Guacamole RDP client.
@@ -156,6 +187,12 @@ typedef struct guac_rdp_settings {
     char* drive_path;
 
     /**
+     * Whether to automatically create the local system path if it does not
+     * exist.
+     */
+    int create_drive_path;
+
+    /**
      * Whether this session is a console session.
      */
     int console;
@@ -219,25 +256,210 @@ typedef struct guac_rdp_settings {
      */
     char** svc_names;
 
+    /**
+     * Whether the desktop wallpaper should be visible. If unset, the desktop
+     * wallpaper will be hidden, reducing the amount of bandwidth required.
+     */
+    int wallpaper_enabled;
+
+    /**
+     * Whether desktop and window theming should be allowed. If unset, theming
+     * is temporarily disabled on the desktop of the RDP server for the sake of
+     * performance, reducing the amount of bandwidth required.
+     */
+    int theming_enabled;
+
+    /**
+     * Whether glyphs should be smoothed with antialiasing (ClearType). If
+     * unset, glyphs will be rendered with sharp edges and using single colors,
+     * effectively 1-bit images, reducing the amount of bandwidth required.
+     */
+    int font_smoothing_enabled;
+
+    /**
+     * Whether windows contents should be shown as they are moved. If unset,
+     * only a window border will be shown during window move operations,
+     * reducing the amount of bandwidth required.
+     */
+    int full_window_drag_enabled;
+
+    /**
+     * Whether desktop composition (Aero) should be enabled during the session.
+     * As desktop composition provides alpha blending and other special
+     * effects, this increases the amount of bandwidth used. If unset, desktop
+     * composition will be disabled.
+     */
+    int desktop_composition_enabled;
+
+    /**
+     * Whether menu animations should be shown. If unset, menus will not be
+     * animated, reducing the amount of bandwidth required.
+     */
+    int menu_animations_enabled;
+
+    /**
+     * The preconnection ID to send within the preconnection PDU when
+     * initiating an RDP connection, if any. If no preconnection ID is
+     * specified, this will be -1.
+     */
+    int preconnection_id;
+
+    /**
+     * The preconnection BLOB (PCB) to send to the RDP server prior to full RDP
+     * connection negotiation. This value is used by Hyper-V to select the
+     * destination VM.
+     */
+    char* preconnection_blob;
+
+#ifdef ENABLE_COMMON_SSH
+    /**
+     * Whether SFTP should be enabled for the VNC connection.
+     */
+    int enable_sftp;
+
+    /**
+     * The hostname of the SSH server to connect to for SFTP.
+     */
+    char* sftp_hostname;
+
+    /**
+     * The port of the SSH server to connect to for SFTP.
+     */
+    char* sftp_port;
+
+    /**
+     * The username to provide when authenticating with the SSH server for
+     * SFTP.
+     */
+    char* sftp_username;
+
+    /**
+     * The password to provide when authenticating with the SSH server for
+     * SFTP (if not using a private key).
+     */
+    char* sftp_password;
+
+    /**
+     * The base64-encoded private key to use when authenticating with the SSH
+     * server for SFTP (if not using a password).
+     */
+    char* sftp_private_key;
+
+    /**
+     * The passphrase to use to decrypt the provided base64-encoded private
+     * key.
+     */
+    char* sftp_passphrase;
+
+    /**
+     * The default location for file uploads within the SSH server. This will
+     * apply only to uploads which do not use the filesystem guac_object (where
+     * the destination directory is otherwise ambiguous).
+     */
+    char* sftp_directory;
+#endif
+
+    /**
+     * The path in which the screen recording should be saved, if enabled. If
+     * no screen recording should be saved, this will be NULL.
+     */
+    char* recording_path;
+
+    /**
+     * The filename to use for the screen recording, if enabled.
+     */
+    char* recording_name;
+
+    /**
+     * Whether the screen recording path should be automatically created if it
+     * does not already exist.
+     */
+    int create_recording_path;
+
+    /**
+     * The method to apply when the user's display changes size.
+     */
+    guac_rdp_resize_method resize_method;
+
 } guac_rdp_settings;
 
 /**
+ * Parses all given args, storing them in a newly-allocated settings object. If
+ * the args fail to parse, NULL is returned.
+ *
+ * @param user
+ *     The user who submitted the given arguments while joining the
+ *     connection.
+ *
+ * @param argc
+ *     The number of arguments within the argv array.
+ *
+ * @param argv
+ *     The values of all arguments provided by the user.
+ *
+ * @return
+ *     A newly-allocated settings object which must be freed with
+ *     guac_rdp_settings_free() when no longer needed. If the arguments fail
+ *     to parse, NULL is returned.
+ */
+guac_rdp_settings* guac_rdp_parse_args(guac_user* user,
+        int argc, const char** argv);
+
+/**
+ * Frees the given guac_rdp_settings object, having been previously allocated
+ * via guac_rdp_parse_args().
+ *
+ * @param settings
+ *     The settings object to free.
+ */
+void guac_rdp_settings_free(guac_rdp_settings* settings);
+
+/**
+ * NULL-terminated array of accepted client args.
+ */
+extern const char* GUAC_RDP_CLIENT_ARGS[];
+
+/**
  * Save all given settings to the given freerdp instance.
+ *
+ * @param guac_settings
+ *     The guac_rdp_settings object to save.
+ *
+ * @param rdp
+ *     The RDP instance to save settings to.
  */
 void guac_rdp_push_settings(guac_rdp_settings* guac_settings, freerdp* rdp);
 
 /**
  * Returns the width of the RDP session display.
+ *
+ * @param rdp
+ *     The RDP instance to retrieve the width from.
+ *
+ * @return
+ *     The current width of the RDP display, in pixels.
  */
 int guac_rdp_get_width(freerdp* rdp);
 
 /**
  * Returns the height of the RDP session display.
+ *
+ * @param rdp
+ *     The RDP instance to retrieve the height from.
+ *
+ * @return
+ *     The current height of the RDP display, in pixels.
  */
 int guac_rdp_get_height(freerdp* rdp);
 
 /**
  * Returns the depth of the RDP session display.
+ *
+ * @param rdp
+ *     The RDP instance to retrieve the depth from.
+ *
+ * @return
+ *     The current depth of the RDP display, in bits per pixel.
  */
 int guac_rdp_get_depth(freerdp* rdp);
 

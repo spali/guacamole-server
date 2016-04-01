@@ -23,19 +23,18 @@
 #include "config.h"
 
 #include "buffer.h"
-#include "blank.h"
 #include "common.h"
-#include "cursor.h"
 #include "display.h"
-#include "ibar.h"
 #include "guac_clipboard.h"
+#include "guac_cursor.h"
 #include "packet.h"
-#include "pointer.h"
 #include "scrollbar.h"
 #include "terminal.h"
 #include "terminal_handlers.h"
 #include "types.h"
+#include "typescript.h"
 
+#include <errno.h>
 #include <pthread.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -190,20 +189,127 @@ void guac_terminal_reset(guac_terminal* term) {
 
 }
 
+/**
+ * Paints or repaints the background of the terminal display. This painting
+ * occurs beneath the actual terminal and scrollbar layers, and thus will not
+ * overwrite any text or other content currently on the screen. This is only
+ * necessary to paint over parts of the terminal background which may otherwise
+ * be transparent (the default layer background).
+ *
+ * @param terminal
+ *     The terminal whose background should be painted or repainted.
+ *
+ * @param socket
+ *     The socket over which instructions required to paint / repaint the
+ *     terminal background should be send.
+ */
+static void guac_terminal_repaint_default_layer(guac_terminal* terminal,
+        guac_socket* socket) {
+
+    int width = terminal->width;
+    int height = terminal->height;
+    guac_terminal_display* display = terminal->display;
+
+    /* Get background color */
+    const guac_terminal_color* color =
+        &guac_terminal_palette[display->default_background];
+
+    /* Reset size */
+    guac_protocol_send_size(socket, GUAC_DEFAULT_LAYER, width, height);
+
+    /* Paint background color */
+    guac_protocol_send_rect(socket, GUAC_DEFAULT_LAYER, 0, 0, width, height);
+    guac_protocol_send_cfill(socket, GUAC_COMP_OVER, GUAC_DEFAULT_LAYER,
+            color->red, color->green, color->blue, 0xFF);
+
+}
+
+/**
+ * Automatically and continuously renders frames of terminal data while the
+ * associated guac_client is running.
+ *
+ * @param data
+ *     A pointer to the guac_terminal that should be continuously rendered
+ *     while its associated guac_client is running.
+ *
+ * @return
+ *     Always NULL.
+ */
+void* guac_terminal_thread(void* data) {
+
+    guac_terminal* terminal = (guac_terminal*) data;
+    guac_client* client = terminal->client;
+
+    /* Render frames only while client is running */
+    while (client->state == GUAC_CLIENT_RUNNING) {
+
+        /* Stop rendering if an error occurs */
+        if (guac_terminal_render_frame(terminal))
+            break;
+
+        /* Signal end of frame */
+        guac_client_end_frame(client);
+        guac_socket_flush(client->socket);
+
+    }
+
+    /* The client has stopped or an error has occurred */
+    return NULL;
+
+}
+
 guac_terminal* guac_terminal_create(guac_client* client,
         const char* font_name, int font_size, int dpi,
-        int width, int height) {
+        int width, int height, const char* color_scheme) {
 
+    int default_foreground;
+    int default_background;
+
+    /* Default to "gray-black" color scheme if no scheme provided */
+    if (color_scheme == NULL || color_scheme[0] == '\0') {
+        default_foreground = GUAC_TERMINAL_COLOR_GRAY;
+        default_background = GUAC_TERMINAL_COLOR_BLACK;
+    }
+
+    /* Otherwise, parse color scheme */
+    else if (strcmp(color_scheme, GUAC_TERMINAL_SCHEME_GRAY_BLACK) == 0) {
+        default_foreground = GUAC_TERMINAL_COLOR_GRAY;
+        default_background = GUAC_TERMINAL_COLOR_BLACK;
+    }
+    else if (strcmp(color_scheme, GUAC_TERMINAL_SCHEME_BLACK_WHITE) == 0) {
+        default_foreground = GUAC_TERMINAL_COLOR_BLACK;
+        default_background = GUAC_TERMINAL_COLOR_WHITE;
+    }
+    else if (strcmp(color_scheme, GUAC_TERMINAL_SCHEME_GREEN_BLACK) == 0) {
+        default_foreground = GUAC_TERMINAL_COLOR_DARK_GREEN;
+        default_background = GUAC_TERMINAL_COLOR_BLACK;
+    }
+    else if (strcmp(color_scheme, GUAC_TERMINAL_SCHEME_WHITE_BLACK) == 0) {
+        default_foreground = GUAC_TERMINAL_COLOR_WHITE;
+        default_background = GUAC_TERMINAL_COLOR_BLACK;
+    }
+
+    /* If invalid, default to "gray-black" */
+    else {
+        guac_client_log(client, GUAC_LOG_WARNING,
+                "Invalid color scheme: \"%s\". Defaulting to \"gray-black\".",
+                color_scheme);
+        default_foreground = GUAC_TERMINAL_COLOR_GRAY;
+        default_background = GUAC_TERMINAL_COLOR_BLACK;
+    }
+
+    /* Build default character using default colors */
     guac_terminal_char default_char = {
         .value = 0,
         .attributes = {
-            .foreground = 7,
-            .background = 0,
+            .foreground = default_foreground,
+            .background = default_background,
             .bold       = false,
             .reverse    = false,
             .underscore = false
         },
-        .width = 1};
+        .width = 1
+    };
 
     /* Calculate available display area */
     int available_width = width - GUAC_TERMINAL_SCROLLBAR_WIDTH;
@@ -231,10 +337,18 @@ guac_terminal* guac_terminal_create(guac_client* client,
         return NULL;
     }
 
+    /* Init common cursor */
+    term->cursor = guac_common_cursor_alloc(client);
+
     /* Init terminal state */
     term->current_attributes = default_char.attributes;
     term->default_char = default_char;
 
+    /* Set pixel size */
+    term->width = width;
+    term->height = height;
+
+    /* Calculate character size */
     term->term_width   = available_width / term->display->char_width;
     term->term_height  = height / term->display->char_height;
 
@@ -254,18 +368,23 @@ guac_terminal* guac_terminal_create(guac_client* client,
         return NULL;
     }
 
+    /* Init pipe stream (output to display by default) */
+    term->pipe_stream = NULL;
+
+    /* No typescript by default */
+    term->typescript = NULL;
+
     /* Init terminal lock */
     pthread_mutex_init(&(term->lock), NULL);
 
-    /* Size display */
-    guac_protocol_send_size(term->display->client->socket,
-            GUAC_DEFAULT_LAYER, width, height);
+    /* Repaint and resize overall display */
+    guac_terminal_repaint_default_layer(term, client->socket);
     guac_terminal_display_resize(term->display,
             term->term_width, term->term_height);
 
     /* Allocate scrollbar */
-    term->scrollbar = guac_terminal_scrollbar_alloc(term->client,
-            GUAC_DEFAULT_LAYER, width, height, term->term_height);
+    term->scrollbar = guac_terminal_scrollbar_alloc(client, GUAC_DEFAULT_LAYER,
+            width, height, term->term_height);
 
     /* Associate scrollbar with this terminal */
     term->scrollbar->data = term;
@@ -278,24 +397,26 @@ guac_terminal* guac_terminal_create(guac_client* client,
     term->mod_ctrl  =
     term->mod_shift = 0;
 
-    /* Set up mouse cursors */
-    term->pointer_cursor = guac_terminal_create_pointer(client);
-    term->ibar_cursor    = guac_terminal_create_ibar(client);
-    term->blank_cursor   = guac_terminal_create_blank(client);
-
     /* Initialize mouse cursor */
-    term->current_cursor = term->blank_cursor;
-    guac_terminal_set_cursor(term->client, term->current_cursor);
+    term->current_cursor = GUAC_TERMINAL_CURSOR_BLANK;
+    guac_common_cursor_set_blank(term->cursor);
 
     /* Allocate clipboard */
     term->clipboard = guac_common_clipboard_alloc(GUAC_TERMINAL_CLIPBOARD_MAX_LENGTH);
+
+    /* Start terminal thread */
+    if (pthread_create(&(term->thread), NULL,
+                guac_terminal_thread, (void*) term)) {
+        guac_terminal_free(term);
+        return NULL;
+    }
 
     return term;
 
 }
 
 void guac_terminal_free(guac_terminal* term) {
-    
+
     /* Close terminal output pipe */
     close(term->stdout_pipe_fd[1]);
     close(term->stdout_pipe_fd[0]);
@@ -303,6 +424,15 @@ void guac_terminal_free(guac_terminal* term) {
     /* Close user input pipe */
     close(term->stdin_pipe_fd[1]);
     close(term->stdin_pipe_fd[0]);
+
+    /* Wait for render thread to finish */
+    pthread_join(term->thread, NULL);
+
+    /* Close and flush any open pipe stream */
+    guac_terminal_pipe_stream_close(term);
+
+    /* Close and flush any active typescript */
+    guac_terminal_typescript_free(term->typescript);
 
     /* Free display */
     guac_terminal_display_free(term->display);
@@ -316,10 +446,8 @@ void guac_terminal_free(guac_terminal* term) {
     /* Free scrollbar */
     guac_terminal_scrollbar_free(term->scrollbar);
 
-    /* Free cursors */
-    guac_terminal_cursor_free(term->client, term->pointer_cursor);
-    guac_terminal_cursor_free(term->client, term->ibar_cursor);
-    guac_terminal_cursor_free(term->client, term->blank_cursor);
+    /* Free the terminal itself */
+    free(term);
 
 }
 
@@ -478,7 +606,10 @@ int guac_terminal_printf(guac_terminal* terminal, const char* format, ...) {
 
 }
 
-void guac_terminal_prompt(guac_terminal* terminal, const char* title, char* str, int size, bool echo) {
+char* guac_terminal_prompt(guac_terminal* terminal, const char* title,
+        bool echo) {
+
+    char buffer[1024];
 
     int pos;
     char in_byte;
@@ -486,16 +617,12 @@ void guac_terminal_prompt(guac_terminal* terminal, const char* title, char* str,
     /* Print title */
     guac_terminal_printf(terminal, "%s", title);
 
-    /* Make room for null terminator */
-    size--;
-
     /* Read bytes until newline */
     pos = 0;
-    while (pos < size && guac_terminal_read_stdin(terminal, &in_byte, 1) == 1) {
+    while (guac_terminal_read_stdin(terminal, &in_byte, 1) == 1) {
 
         /* Backspace */
         if (in_byte == 0x7F) {
-
             if (pos > 0) {
                 guac_terminal_printf(terminal, "\b \b");
                 pos--;
@@ -508,10 +635,11 @@ void guac_terminal_prompt(guac_terminal* terminal, const char* title, char* str,
             break;
         }
 
-        else {
+        /* Otherwise, store byte if there is room */
+        else if (pos < sizeof(buffer) - 1) {
 
             /* Store character, update buffers */
-            str[pos++] = in_byte;
+            buffer[pos++] = in_byte;
 
             /* Print character if echoing */
             if (echo)
@@ -521,10 +649,15 @@ void guac_terminal_prompt(guac_terminal* terminal, const char* title, char* str,
 
         }
 
+        /* Ignore all other input */
+
     }
 
     /* Terminate string */
-    str[pos] = 0;
+    buffer[pos] = 0;
+
+    /* Return newly-allocated string containing result */
+    return strdup(buffer);
 
 }
 
@@ -586,8 +719,18 @@ void guac_terminal_commit_cursor(guac_terminal* term) {
 int guac_terminal_write(guac_terminal* term, const char* c, int size) {
 
     while (size > 0) {
-        term->char_handler(term, *(c++));
+
+        /* Read and advance to next character */
+        char current = *(c++);
         size--;
+
+        /* Write character to typescript, if any */
+        if (term->typescript != NULL)
+            guac_terminal_typescript_write(term->typescript, current);
+
+        /* Handle character and its meaning */
+        term->char_handler(term, current);
+
     }
 
     return 0;
@@ -1218,7 +1361,6 @@ int guac_terminal_resize(guac_terminal* terminal, int width, int height) {
 
     guac_terminal_display* display = terminal->display;
     guac_client* client = display->client;
-    guac_socket* socket = client->socket;
 
     /* Acquire exclusive access to terminal */
     guac_terminal_lock(terminal);
@@ -1232,8 +1374,12 @@ int guac_terminal_resize(guac_terminal* terminal, int width, int height) {
     int rows    = height / display->char_height;
     int columns = available_width / display->char_width;
 
+    /* Set pixel sizes */
+    terminal->width = width;
+    terminal->height = height;
+
     /* Resize default layer to given pixel dimensions */
-    guac_protocol_send_size(socket, GUAC_DEFAULT_LAYER, width, height);
+    guac_terminal_repaint_default_layer(terminal, client->socket);
 
     /* Notify scrollbar of resize */
     guac_terminal_scrollbar_parent_resized(terminal->scrollbar, width, height, rows);
@@ -1262,9 +1408,16 @@ int guac_terminal_resize(guac_terminal* terminal, int width, int height) {
 }
 
 void guac_terminal_flush(guac_terminal* terminal) {
+
+    /* Flush typescript if in use */
+    if (terminal->typescript != NULL)
+        guac_terminal_typescript_flush(terminal->typescript);
+
+    /* Flush display state */
     guac_terminal_commit_cursor(terminal);
     guac_terminal_display_flush(terminal->display);
     guac_terminal_scrollbar_flush(terminal->scrollbar);
+
 }
 
 void guac_terminal_lock(guac_terminal* terminal) {
@@ -1286,9 +1439,9 @@ int guac_terminal_send_string(guac_terminal* term, const char* data) {
 static int __guac_terminal_send_key(guac_terminal* term, int keysym, int pressed) {
 
     /* Hide mouse cursor if not already hidden */
-    if (term->current_cursor != term->blank_cursor) {
-        term->current_cursor = term->blank_cursor;
-        guac_terminal_set_cursor(term->client, term->blank_cursor);
+    if (term->current_cursor != GUAC_TERMINAL_CURSOR_BLANK) {
+        term->current_cursor = GUAC_TERMINAL_CURSOR_BLANK;
+        guac_common_cursor_set_blank(term->cursor);
         guac_terminal_notify(term);
     }
 
@@ -1445,7 +1598,8 @@ int guac_terminal_send_key(guac_terminal* term, int keysym, int pressed) {
 
 }
 
-static int __guac_terminal_send_mouse(guac_terminal* term, int x, int y, int mask) {
+static int __guac_terminal_send_mouse(guac_terminal* term, guac_user* user,
+        int x, int y, int mask) {
 
     guac_client* client = term->client;
     guac_socket* socket = client->socket;
@@ -1454,13 +1608,17 @@ static int __guac_terminal_send_mouse(guac_terminal* term, int x, int y, int mas
     int released_mask =  term->mouse_mask & ~mask;
     int pressed_mask  = ~term->mouse_mask &  mask;
 
+    /* Store current mouse location */
+    guac_common_cursor_move(term->cursor, user, x, y);
+
     /* Notify scrollbar, do not handle anything handled by scrollbar */
     if (guac_terminal_scrollbar_handle_mouse(term->scrollbar, x, y, mask)) {
 
         /* Set pointer cursor if mouse is over scrollbar */
-        if (term->current_cursor != term->pointer_cursor) {
-            term->current_cursor = term->pointer_cursor;
-            guac_terminal_set_cursor(client, term->pointer_cursor);
+        if (term->current_cursor != GUAC_TERMINAL_CURSOR_POINTER) {
+            term->current_cursor = GUAC_TERMINAL_CURSOR_POINTER;
+            guac_common_cursor_set_pointer(term->cursor);
+            guac_terminal_notify(term);
         }
 
         guac_terminal_notify(term);
@@ -1471,9 +1629,9 @@ static int __guac_terminal_send_mouse(guac_terminal* term, int x, int y, int mas
     term->mouse_mask = mask;
 
     /* Show mouse cursor if not already shown */
-    if (term->current_cursor != term->ibar_cursor) {
-        term->current_cursor = term->ibar_cursor;
-        guac_terminal_set_cursor(client, term->ibar_cursor);
+    if (term->current_cursor != GUAC_TERMINAL_CURSOR_IBAR) {
+        term->current_cursor = GUAC_TERMINAL_CURSOR_IBAR;
+        guac_common_cursor_set_ibar(term->cursor);
         guac_terminal_notify(term);
     }
 
@@ -1534,12 +1692,13 @@ static int __guac_terminal_send_mouse(guac_terminal* term, int x, int y, int mas
 
 }
 
-int guac_terminal_send_mouse(guac_terminal* term, int x, int y, int mask) {
+int guac_terminal_send_mouse(guac_terminal* term, guac_user* user,
+        int x, int y, int mask) {
 
     int result;
 
     guac_terminal_lock(term);
-    result = __guac_terminal_send_mouse(term, x, y, mask);
+    result = __guac_terminal_send_mouse(term, user, x, y, mask);
     guac_terminal_unlock(term);
 
     return result;
@@ -1652,5 +1811,122 @@ int guac_terminal_next_tab(guac_terminal* term, int column) {
     }
 
     return tabstop;
+}
+
+void guac_terminal_pipe_stream_open(guac_terminal* term, const char* name) {
+
+    guac_client* client = term->client;
+    guac_socket* socket = client->socket;
+
+    /* Close existing stream, if any */
+    guac_terminal_pipe_stream_close(term);
+
+    /* Allocate and assign new pipe stream */
+    term->pipe_stream = guac_client_alloc_stream(client);
+    term->pipe_buffer_length = 0;
+
+    /* Open new pipe stream */
+    guac_protocol_send_pipe(socket, term->pipe_stream, "text/plain", name);
+
+    /* Log redirect at debug level */
+    guac_client_log(client, GUAC_LOG_DEBUG,
+            "Terminal output now redirected to pipe '%s'.", name);
+
+}
+
+void guac_terminal_pipe_stream_write(guac_terminal* term, char c) {
+
+    /* Append byte to buffer only if pipe is open */
+    if (term->pipe_stream != NULL) {
+
+        /* Flush buffer if no space is available */
+        if (term->pipe_buffer_length == sizeof(term->pipe_buffer))
+            guac_terminal_pipe_stream_flush(term);
+
+        /* Append single byte to buffer */
+        term->pipe_buffer[term->pipe_buffer_length++] = c;
+
+    }
+
+}
+
+void guac_terminal_pipe_stream_flush(guac_terminal* term) {
+
+    guac_client* client = term->client;
+    guac_socket* socket = client->socket;
+    guac_stream* pipe_stream = term->pipe_stream;
+
+    /* Write blob if data exists in buffer */
+    if (pipe_stream != NULL && term->pipe_buffer_length > 0) {
+        guac_protocol_send_blob(socket, pipe_stream,
+                term->pipe_buffer, term->pipe_buffer_length);
+        term->pipe_buffer_length = 0;
+    }
+
+}
+
+void guac_terminal_pipe_stream_close(guac_terminal* term) {
+
+    guac_client* client = term->client;
+    guac_socket* socket = client->socket;
+    guac_stream* pipe_stream = term->pipe_stream;
+
+    /* Close any existing pipe */
+    if (pipe_stream != NULL) {
+
+        /* Write end of stream */
+        guac_terminal_pipe_stream_flush(term);
+        guac_protocol_send_end(socket, pipe_stream);
+
+        /* Destroy stream */
+        guac_client_free_stream(client, pipe_stream);
+        term->pipe_stream = NULL;
+
+        /* Log redirect at debug level */
+        guac_client_log(client, GUAC_LOG_DEBUG,
+                "Terminal output now redirected to display.");
+
+    }
+
+}
+
+int guac_terminal_create_typescript(guac_terminal* term, const char* path,
+        const char* name, int create_path) {
+
+    /* Create typescript */
+    term->typescript = guac_terminal_typescript_alloc(path, name, create_path);
+
+    /* Log failure */
+    if (term->typescript == NULL) {
+        guac_client_log(term->client, GUAC_LOG_ERROR,
+                "Creation of typescript failed: %s", strerror(errno));
+        return 1;
+    }
+
+    /* If typescript was successfully created, log filenames */
+    guac_client_log(term->client, GUAC_LOG_INFO,
+            "Typescript of terminal session will be saved to \"%s\". "
+            "Timing file is \"%s\".",
+            term->typescript->data_filename,
+            term->typescript->timing_filename);
+
+    /* Typescript creation succeeded */
+    return 0;
+
+}
+
+void guac_terminal_dup(guac_terminal* term, guac_user* user,
+        guac_socket* socket) {
+
+    /* Synchronize display state with new user */
+    guac_terminal_repaint_default_layer(term, socket);
+    guac_terminal_display_dup(term->display, user, socket);
+
+    /* Synchronize mouse cursor */
+    guac_common_cursor_dup(term->cursor, user, socket);
+
+    /* Paint scrollbar for joining user */
+    guac_terminal_scrollbar_dup(term->scrollbar, user, socket);
+
 }
 

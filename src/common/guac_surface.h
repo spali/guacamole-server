@@ -27,20 +27,66 @@
 #include "guac_rect.h"
 
 #include <cairo/cairo.h>
+#include <guacamole/client.h>
 #include <guacamole/layer.h>
 #include <guacamole/protocol.h>
 #include <guacamole/socket.h>
 
 /**
- * The maximum number of updates to allow within the PNG queue.
+ * The maximum number of updates to allow within the bitmap queue.
  */
 #define GUAC_COMMON_SURFACE_QUEUE_SIZE 256
 
 /**
- * Representation of a PNG update, having a rectangle of image data (stored
+ * Heat map cell size in pixels. Each side of each heat map cell will consist
+ * of this many pixels.
+ */
+#define GUAC_COMMON_SURFACE_HEAT_CELL_SIZE 64
+
+/**
+ * The width or height of the heat map (in cells) given the width or height of
+ * the image (in pixels).
+ */
+#define GUAC_COMMON_SURFACE_HEAT_DIMENSION(x) (       \
+        (x + GUAC_COMMON_SURFACE_HEAT_CELL_SIZE - 1)  \
+            / GUAC_COMMON_SURFACE_HEAT_CELL_SIZE      \
+)
+
+/**
+ * The number of entries to collect within each heat map cell. Collected
+ * history entries are used to determine the framerate of the region associated
+ * with that cell.
+ */
+#define GUAC_COMMON_SURFACE_HEAT_CELL_HISTORY_SIZE 5
+
+/**
+ * Representation of a cell in the refresh heat map. This cell is used to keep
+ * track of how often an area on a surface is refreshed.
+ */
+typedef struct guac_common_surface_heat_cell {
+
+    /**
+     * Timestamps of each of the last N updates covering the location
+     * associated with this heat map cell. This is used to calculate the
+     * framerate. This array is structured as a ring buffer containing history
+     * entries in chronologically-ascending order, starting at the entry
+     * pointed to by oldest_entry and proceeding through all other entries,
+     * wrapping around if the end of the array is reached.
+     */
+    guac_timestamp history[GUAC_COMMON_SURFACE_HEAT_CELL_HISTORY_SIZE];
+
+    /**
+     * Index of the oldest entry within the history.
+     */
+    int oldest_entry;
+
+} guac_common_surface_heat_cell;
+
+/**
+ * Representation of a bitmap update, having a rectangle of image data (stored
  * elsewhere) and a flushed/not-flushed state.
  */
-typedef struct guac_common_surface_png_rect {
+typedef struct guac_common_surface_bitmap_rect {
 
     /**
      * Whether this rectangle has been flushed.
@@ -48,11 +94,11 @@ typedef struct guac_common_surface_png_rect {
     int flushed;
 
     /**
-     * The rectangle containing the PNG update.
+     * The rectangle containing the bitmap update.
      */
     guac_common_rect rect;
 
-} guac_common_surface_png_rect;
+} guac_common_surface_bitmap_rect;
 
 /**
  * Surface which backs a Guacamole buffer or layer, automatically
@@ -64,6 +110,11 @@ typedef struct guac_common_surface {
      * The layer this surface will draw to.
      */
     const guac_layer* layer;
+
+    /**
+     * The client associated with this surface.
+     */
+    guac_client* client;
 
     /**
      * The socket to send instructions on when flushing.
@@ -117,27 +168,46 @@ typedef struct guac_common_surface {
     guac_common_rect clip_rect;
 
     /**
-     * The number of updates in the PNG queue.
+     * The number of updates in the bitmap queue.
      */
-    int png_queue_length;
+    int bitmap_queue_length;
 
     /**
-     * All queued PNG updates.
+     * All queued bitmap updates.
      */
-    guac_common_surface_png_rect png_queue[GUAC_COMMON_SURFACE_QUEUE_SIZE];
+    guac_common_surface_bitmap_rect bitmap_queue[GUAC_COMMON_SURFACE_QUEUE_SIZE];
+
+    /**
+     * A heat map keeping track of the refresh frequency of
+     * the areas of the screen.
+     */
+    guac_common_surface_heat_cell* heat_map;
 
 } guac_common_surface;
 
 /**
  * Allocates a new guac_common_surface, assigning it to the given layer.
  *
- * @param socket The socket to send instructions on when flushing.
- * @param layer The layer to associate with the new surface.
- * @param w The width of the surface.
- * @param h The height of the surface.
- * @return A newly-allocated guac_common_surface.
+ * @param client
+ *     The client associated with the given layer.
+ *
+ * @param socket
+ *     The socket to send instructions on when flushing.
+ *
+ * @param layer
+ *     The layer to associate with the new surface.
+ *
+ * @param w
+ *     The width of the surface.
+ *
+ * @param h
+ *     The height of the surface.
+ *
+ * @return
+ *     A newly-allocated guac_common_surface.
  */
-guac_common_surface* guac_common_surface_alloc(guac_socket* socket, const guac_layer* layer, int w, int h);
+guac_common_surface* guac_common_surface_alloc(guac_client* client,
+        guac_socket* socket, const guac_layer* layer, int w, int h);
 
 /**
  * Frees the given guac_common_surface. Beware that this will NOT free any
@@ -266,6 +336,22 @@ void guac_common_surface_flush(guac_common_surface* surface);
  * @param surface The surface to flush.
  */
 void guac_common_surface_flush_deferred(guac_common_surface* surface);
+
+/**
+ * Duplicates the contents of the current surface to the given socket. Pending
+ * changes are not flushed.
+ *
+ * @param surface
+ *     The surface to duplicate.
+ *
+ * @param user
+ *     The user receiving the surface.
+ *
+ * @param socket
+ *     The socket over which the surface contents should be sent.
+ */
+void guac_common_surface_dup(guac_common_surface* surface, guac_user* user,
+        guac_socket* socket);
 
 #endif
 

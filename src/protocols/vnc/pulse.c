@@ -22,36 +22,65 @@
 
 #include "config.h"
 
-#include "client.h"
 #include "pulse.h"
+#include "vnc.h"
 
 #include <guacamole/audio.h>
 #include <guacamole/client.h>
+#include <guacamole/socket.h>
 #include <pulse/pulseaudio.h>
+
+/**
+ * Returns whether the given buffer contains only silence (only null bytes).
+ *
+ * @param buffer
+ *     The audio buffer to check.
+ *
+ * @param length
+ *     The length of the buffer to check.
+ *
+ * @return
+ *     Non-zero if the audio buffer contains silence, zero otherwise.
+ */
+static int guac_pa_is_silence(const void* buffer, size_t length) {
+
+    int i;
+
+    const unsigned char* current = (const unsigned char*) buffer;
+
+    /* For each byte in buffer */
+    for (i = 0; i < length; i++) {
+
+        /* If current value non-zero, then not silence */
+        if (*(current++))
+            return 0;
+
+    }
+
+    /* Otherwise, the buffer contains 100% silence */
+    return 1;
+
+}
 
 static void __stream_read_callback(pa_stream* stream, size_t length,
         void* data) {
 
     guac_client* client = (guac_client*) data;
-    vnc_guac_client_data* client_data = (vnc_guac_client_data*) client->data;
-    guac_audio_stream* audio = client_data->audio;
+    guac_vnc_client* vnc_client = (guac_vnc_client*) client->data;
+    guac_audio_stream* audio = vnc_client->audio;
 
     const void* buffer;
 
     /* Read data */
     pa_stream_peek(stream, &buffer, &length);
 
-    /* Write data */
-    guac_audio_stream_write_pcm(audio, buffer, length);
+    /* Continuously write received PCM data */
+    if (!guac_pa_is_silence(buffer, length))
+        guac_audio_stream_write_pcm(audio, buffer, length);
 
-    /* Flush occasionally */
-    if (audio->pcm_bytes_written > GUAC_VNC_PCM_WRITE_RATE) {
-        guac_audio_stream_end(audio);
-        guac_audio_stream_begin(client_data->audio,
-                GUAC_VNC_AUDIO_RATE,
-                GUAC_VNC_AUDIO_CHANNELS,
-                GUAC_VNC_AUDIO_BPS);
-    }
+    /* Flush upon silence */
+    else
+        guac_audio_stream_flush(audio);
 
     /* Advance buffer */
     pa_stream_drop(stream);
@@ -202,39 +231,37 @@ static void __context_state_callback(pa_context* context, void* data) {
 
 void guac_pa_start_stream(guac_client* client) {
 
-    vnc_guac_client_data* client_data = (vnc_guac_client_data*) client->data;
+    guac_vnc_client* vnc_client = (guac_vnc_client*) client->data;
+    guac_vnc_settings* settings = vnc_client->settings;
+
     pa_context* context;
 
     guac_client_log(client, GUAC_LOG_INFO, "Starting audio stream");
-    guac_audio_stream_begin(client_data->audio,
-                GUAC_VNC_AUDIO_RATE,
-                GUAC_VNC_AUDIO_CHANNELS,
-                GUAC_VNC_AUDIO_BPS);
 
     /* Init main loop */
-    client_data->pa_mainloop = pa_threaded_mainloop_new();
+    vnc_client->pa_mainloop = pa_threaded_mainloop_new();
 
     /* Create context */
     context = pa_context_new(
-            pa_threaded_mainloop_get_api(client_data->pa_mainloop),
+            pa_threaded_mainloop_get_api(vnc_client->pa_mainloop),
             "Guacamole Audio");
 
     /* Set up context */
     pa_context_set_state_callback(context, __context_state_callback, client);
-    pa_context_connect(context, client_data->pa_servername,
+    pa_context_connect(context, settings->pa_servername,
             PA_CONTEXT_NOAUTOSPAWN, NULL);
 
     /* Start loop */
-    pa_threaded_mainloop_start(client_data->pa_mainloop);
+    pa_threaded_mainloop_start(vnc_client->pa_mainloop);
 
 }
 
 void guac_pa_stop_stream(guac_client* client) {
 
-    vnc_guac_client_data* client_data = (vnc_guac_client_data*) client->data;
+    guac_vnc_client* vnc_client = (guac_vnc_client*) client->data;
 
     /* Stop loop */
-    pa_threaded_mainloop_stop(client_data->pa_mainloop);
+    pa_threaded_mainloop_stop(vnc_client->pa_mainloop);
 
     guac_client_log(client, GUAC_LOG_INFO, "Audio stream finished");
 

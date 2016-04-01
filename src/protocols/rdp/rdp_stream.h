@@ -25,9 +25,10 @@
 #define _GUAC_RDP_STREAM_H
 
 #include "config.h"
+#include "guac_json.h"
 #include "rdp_svc.h"
 
-#include <guacamole/client.h>
+#include <guacamole/user.h>
 #include <guacamole/protocol.h>
 #include <guacamole/stream.h>
 
@@ -69,6 +70,33 @@ typedef struct guac_rdp_upload_status {
 } guac_rdp_upload_status;
 
 /**
+ * The current state of a directory listing operation.
+ */
+typedef struct guac_rdp_ls_status {
+
+    /**
+     * The filesystem associated with the directory being listed.
+     */
+    guac_rdp_fs* fs;
+
+    /**
+     * The file ID of the directory being listed.
+     */
+    int file_id;
+
+    /**
+     * The absolute path of the directory being listed.
+     */
+    char directory_name[GUAC_RDP_FS_MAX_PATH];
+
+    /**
+     * The current state of the JSON directory object being written.
+     */
+    guac_common_json_state json_state;
+
+} guac_rdp_ls_status;
+
+/**
  * All available stream types.
  */
 typedef enum guac_rdp_stream_type {
@@ -82,6 +110,11 @@ typedef enum guac_rdp_stream_type {
      * An in-progress file download.
      */
     GUAC_RDP_DOWNLOAD_STREAM,
+
+    /**
+     * An in-progress stream of a directory listing.
+     */
+    GUAC_RDP_LS_STREAM,
 
     /**
      * The inbound half of a static virtual channel.
@@ -116,6 +149,11 @@ typedef struct guac_rdp_stream {
     guac_rdp_download_status download_status;
 
     /**
+     * The directory list status. Only valid for GUAC_RDP_LS_STREAM.
+     */
+    guac_rdp_ls_status ls_status;
+
+    /**
      * Associated SVC instance. Only valid for GUAC_RDP_INBOUND_SVC_STREAM.
      */
     guac_rdp_svc* svc;
@@ -125,54 +163,67 @@ typedef struct guac_rdp_stream {
 /**
  * Handler for inbound files related to file uploads.
  */
-int guac_rdp_upload_file_handler(guac_client* client, guac_stream* stream,
-        char* mimetype, char* filename);
+guac_user_file_handler guac_rdp_upload_file_handler;
 
 /**
  * Handler for inbound pipes related to static virtual channels.
  */
-int guac_rdp_svc_pipe_handler(guac_client* client, guac_stream* stream,
-        char* mimetype, char* name);
+guac_user_pipe_handler guac_rdp_svc_pipe_handler;
 
 /**
  * Handler for inbound clipboard data.
  */
-int guac_rdp_clipboard_handler(guac_client* client, guac_stream* stream,
-        char* mimetype);
+guac_user_clipboard_handler guac_rdp_clipboard_handler;
 
 /**
  * Handler for stream data related to file uploads.
  */
-int guac_rdp_upload_blob_handler(guac_client* client, guac_stream* stream,
-        void* data, int length);
+guac_user_blob_handler guac_rdp_upload_blob_handler;
 
 /**
  * Handler for stream data related to static virtual channels.
  */
-int guac_rdp_svc_blob_handler(guac_client* client, guac_stream* stream,
-        void* data, int length);
+guac_user_blob_handler guac_rdp_svc_blob_handler;
 
 /**
  * Handler for stream data related to clipboard.
  */
-int guac_rdp_clipboard_blob_handler(guac_client* client, guac_stream* stream,
-        void* data, int length);
+guac_user_blob_handler guac_rdp_clipboard_blob_handler;
 
 /**
  * Handler for end-of-stream related to file uploads.
  */
-int guac_rdp_upload_end_handler(guac_client* client, guac_stream* stream);
+guac_user_end_handler guac_rdp_upload_end_handler;
 
 /**
  * Handler for end-of-stream related to clipboard.
  */
-int guac_rdp_clipboard_end_handler(guac_client* client, guac_stream* stream);
+guac_user_end_handler guac_rdp_clipboard_end_handler;
 
 /**
  * Handler for acknowledgements of receipt of data related to file downloads.
  */
-int guac_rdp_download_ack_handler(guac_client* client, guac_stream* stream,
-        char* message, guac_protocol_status status);
+guac_user_ack_handler guac_rdp_download_ack_handler;
+
+/**
+ * Handler for ack messages received due to receipt of a "body" or "blob"
+ * instruction associated with a directory list operation.
+ */
+guac_user_ack_handler guac_rdp_ls_ack_handler;
+
+/**
+ * Handler for get messages. In context of downloads and the filesystem exposed
+ * via the Guacamole protocol, get messages request the body of a file within
+ * the filesystem.
+ */
+guac_user_get_handler guac_rdp_download_get_handler;
+
+/**
+ * Handler for put messages. In context of uploads and the filesystem exposed
+ * via the Guacamole protocol, put messages request write access to a file
+ * within the filesystem.
+ */
+guac_user_put_handler guac_rdp_upload_put_handler;
 
 #endif
 

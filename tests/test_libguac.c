@@ -39,7 +39,6 @@ int main() {
     register_protocol_suite();
     register_client_suite();
     register_util_suite();
-    register_common_suite();
 
     /* Run tests */
     CU_basic_set_mode(CU_BRM_VERBOSE);

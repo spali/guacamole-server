@@ -1,5 +1,5 @@
 #
-# Copyright (C) 2013 Glyptodon LLC
+# Copyright (C) 2015 Glyptodon LLC
 #
 # Permission is hereby granted, free of charge, to any person obtaining a copy
 # of this software and associated documentation files (the "Software"), to deal
@@ -22,8 +22,6 @@
 
 AUTOMAKE_OPTIONS = foreign 
 
-AM_CFLAGS = -Werror -Wall -pedantic @LIBGUAC_INCLUDE@ @COMMON_INCLUDE@
-
 sbin_PROGRAMS = guacd
 
 man_MANS =           \
@@ -31,26 +29,46 @@ man_MANS =           \
     man/guacd.conf.5
 
 noinst_HEADERS =  \
-    client.h      \
-    client-map.h  \
     conf-args.h   \
     conf-file.h   \
     conf-parse.h  \
-    log.h
+    connection.h  \
+    log.h         \
+    move-fd.h     \
+    proc.h        \
+    proc-map.h    \
+    user.h
 
-guacd_SOURCES =   \
-    daemon.c      \
-	client.c      \
-	client-map.c  \
-	conf-args.c   \
-	conf-file.c   \
-	conf-parse.c  \
-	log.c
+guacd_SOURCES =  \
+    conf-args.c  \
+    conf-file.c  \
+    conf-parse.c \
+    connection.c \
+    daemon.c     \
+    log.c        \
+    move-fd.c    \
+    proc.c       \
+    proc-map.c   \
+    user.c
 
-guacd_LDADD   = @LIBGUAC_LTLIB@ @COMMON_LTLIB@
-guacd_LDFLAGS = @PTHREAD_LIBS@ @SSL_LIBS@
+guacd_CFLAGS =              \
+    -Werror -Wall -pedantic \
+    @COMMON_INCLUDE@        \
+    @LIBGUAC_INCLUDE@
 
-EXTRA_DIST = init.d/guacd.in man/guacd.8 man/guacd.conf.5
+guacd_LDADD =       \
+    @COMMON_LTLIB@  \
+    @LIBGUAC_LTLIB@
+
+guacd_LDFLAGS =    \
+    @PTHREAD_LIBS@ \
+    @SSL_LIBS@
+
+EXTRA_DIST =         \
+    init.d/guacd.in  \
+    man/guacd.8      \
+    man/guacd.conf.5
+
 CLEANFILES = $(init_SCRIPTS)
 
 # SSL support

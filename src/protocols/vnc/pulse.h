@@ -26,6 +26,8 @@
 
 #include "config.h"
 
+#include <guacamole/client.h>
+
 /**
  * The number of bytes to request for the audio fragments received from
  * PulseAudio.
